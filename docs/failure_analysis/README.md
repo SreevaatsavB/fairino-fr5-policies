@@ -36,6 +36,8 @@ off) that made the whole thing worse. Each is documented in detail in the files 
 | 4 | [`04_root_cause_and_fixes.md`](04_root_cause_and_fixes.md) | The full causal chain, the root causes ranked, and a **prioritized, actionable fix list** with how to validate each one. Start here when you want to *do* something. |
 | 5 | [`05_glossary_and_references.md`](05_glossary_and_references.md) | Plain-language definitions of every term, and all the papers with links. |
 | 6 | [`06_cvae_kl_deep_dive.md`](06_cvae_kl_deep_dive.md) | **The CVAE KL term explained from scratch** — what KL divergence is, the ELBO, the reparameterisation trick, and exactly why `kl_weight=10` caused **posterior collapse** (the top training bug). Read after file 3. |
+| 7 | [`07_grasp_gate_requirements.md`](07_grasp_gate_requirements.md) | The deferred **grasp-success gate** — what sensor signal it needs (the FR5 gripper is command-only) and where it plugs into `deploy.py`. |
+| 8 | [`08_the_fix_implementation.md`](08_the_fix_implementation.md) | **What we actually changed** (branch `fix/dino-act-cvae-probe`) — the CVAE fix (free-bits + annealing + lower weight, explained), the DINOv2 2-cam port, the vision-vs-state probe, the full change set, and what's verified vs left. |
 
 ## The 30-second version (if you read nothing else)
 
