@@ -38,6 +38,7 @@ off) that made the whole thing worse. Each is documented in detail in the files 
 | 6 | [`06_cvae_kl_deep_dive.md`](06_cvae_kl_deep_dive.md) | **The CVAE KL term explained from scratch** — what KL divergence is, the ELBO, the reparameterisation trick, and exactly why `kl_weight=10` caused **posterior collapse** (the top training bug). Read after file 3. |
 | 7 | [`07_grasp_gate_requirements.md`](07_grasp_gate_requirements.md) | The deferred **grasp-success gate** — what sensor signal it needs (the FR5 gripper is command-only) and where it plugs into `deploy.py`. |
 | 8 | [`08_the_fix_implementation.md`](08_the_fix_implementation.md) | **What we actually changed** (branch `fix/dino-act-cvae-probe`) — the CVAE fix (free-bits + annealing + lower weight, explained), the DINOv2 2-cam port, the vision-vs-state probe, the full change set, and what's verified vs left. |
+| 9 | [`09_model_capacity_vs_overfitting.md`](09_model_capacity_vs_overfitting.md) | **"Is the model too small?" — No.** Why the large train/val gap is **overfitting** (data-bound), not under-capacity; the 32-dim latent is standard; scale *data* not params. |
 
 ## The 30-second version (if you read nothing else)
 
