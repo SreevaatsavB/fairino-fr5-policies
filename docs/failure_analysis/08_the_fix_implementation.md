@@ -34,7 +34,16 @@ loss = l1 + kl_w * kld          # (3) lower kl_weight (10 -> 0.5)
 ```
 
 Config (`config.yaml` + the dino configs): `kl_weight: 0.5`, `kl_warmup_steps: 2000`,
-`kl_free_bits: 0.1` (smoke/local use smaller warmups).
+`kl_free_bits: 0.03` (smoke/local use smaller warmups).
+
+> **Honesty note (read this).** The CVAE change is the **most-deviating, least-certain** part of
+> this branch — the ACT paper uses `kl_weight = 10` and *deliberately* keeps the latent **weak**
+> (because `z = 0` at inference). The well-evidenced root cause is the **proprioceptive shortcut**
+> (the measured 2.2× state>vision), not the CVAE. So the free-bits floor was deliberately set
+> **gentle** (`0.03/dim ≈ 1 nat`, within the healthy 0.5–5 KL range) — just enough to stop KL hitting
+> exactly zero, *not* enough to force a strong latent that would mismatch `z = 0` at deploy. Treat
+> the KL change as a small, **evidence-gated** tweak: watch the training KL curve and the probe,
+> and if it doesn't help, set `kl_weight: 10` + remove free-bits to fall back to the proven recipe.
 
 ### Why three mechanisms — and what each one is
 

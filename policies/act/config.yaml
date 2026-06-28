@@ -35,7 +35,7 @@ training:
   # Was 10.0 (drove KL -> 0). Now: lower weight + warmup annealing + per-dim free-bits floor.
   kl_weight: 0.5
   kl_warmup_steps: 2000   # linearly ramp the KL weight 0 -> kl_weight
-  kl_free_bits: 0.1       # per-latent-dim KL floor (lambda); optimiser can't push below it
+  kl_free_bits: 0.03       # per-latent-dim KL floor (lambda); optimiser can't push below it
   save_every: 10
   log_every: 50
   checkpoint_dir: "policies/act/checkpoints"

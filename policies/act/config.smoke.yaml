@@ -30,7 +30,7 @@ training:
   grad_clip: 10.0
   kl_weight: 0.5
   kl_warmup_steps: 20     # tiny ramp for the smoke test
-  kl_free_bits: 0.1
+  kl_free_bits: 0.03
   save_every: 1
   log_every: 5
   checkpoint_dir: "policies/act/checkpoints_smoke"

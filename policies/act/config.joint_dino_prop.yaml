@@ -37,7 +37,7 @@ training:
   # CVAE KL fix (was kl_weight: 10.0 -> posterior collapse). See docs/failure_analysis/06.
   kl_weight: 0.5
   kl_warmup_steps: 2000
-  kl_free_bits: 0.1
+  kl_free_bits: 0.03
   save_every: 5
   log_every: 100
   checkpoint_dir: "policies/act/checkpoints_joint_dino_prop"

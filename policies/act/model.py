@@ -65,7 +65,8 @@ class ACTConfig:
 
     # CVAE KL-collapse fix (see docs/failure_analysis/06_cvae_kl_deep_dive.md)
     kl_warmup_steps: int   = 2000   # linearly ramp the KL weight 0 -> kl_weight over these steps
-    kl_free_bits:    float = 0.1    # per-latent-dim KL floor (lambda); the optimiser can't push below it
+    kl_free_bits:    float = 0.03   # per-dim KL floor (lambda); gentle (~1 nat / 32 dims) so the latent
+                                    # stays nonzero WITHOUT being forced strong (z=0 at inference)
 
     # cameras fed as ACT image inputs (lerobot shares one backbone across cameras)
     camera_names: tuple = ("wrist_cam",)
@@ -376,7 +377,7 @@ def build_model(cfg: dict, stats: dict, device) -> "ACT":
         kl_weight=t["kl_weight"],
         temporal_ensemble_coeff=m.get("temporal_ensemble_coeff"),
         kl_warmup_steps=t.get("kl_warmup_steps", 2000),
-        kl_free_bits=t.get("kl_free_bits", 0.1),
+        kl_free_bits=t.get("kl_free_bits", 0.03),
         camera_names=tuple(d.get("camera_names", ["wrist_cam"])),
         proprio_mode=m.get("proprio_mode", "full"),
         proprio_dropout_rate=m.get("proprio_dropout_rate", 0.3),
