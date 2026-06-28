@@ -96,6 +96,26 @@ cameras. The other policies always train on single-camera data, so they receive 
 exactly as before — verified unchanged by `tools/test_inference.py` (all pass) and the diffusion
 smoke test.
 
+### Upgraded vision encoder — DINOv2 / DINOv3 / I-JEPA (configurable)
+
+`DinoV2Backbone` was generalised to **`VisionBackbone`**, which loads any of three frozen
+self-supervised ViTs and reshapes their patch tokens to lerobot's `(B, C, h, w)` feature map (it
+drops any leading CLS/register tokens automatically, so the same code handles all three):
+
+| `dino_backbone` | Loader | Size / patch | Notes |
+|---|---|---|---|
+| `dinov2_vits14` | `torch.hub` | 21M / p14 | the original (open, no auth) |
+| **`dinov3_vits16`** *(new default for the dino configs)* | HF `AutoModel` | 21M / p16 | **upgrade** — stronger features, same footprint. **GATED**: `huggingface-cli login` with a token that accepted Meta's license. |
+| `dinov3_vitb16` / `dinov3_vitl16` | HF `AutoModel` | 86M / 300M | bigger DINOv3 |
+| `ijepa_vith14` | HF `AutoModel` | ~630M | open, but **GPU-only** (smallest public I-JEPA is ViT-H) |
+| any `owner/model` | HF `AutoModel` | — | load any HF ViT id verbatim |
+
+The internal net is kept as `self.dino` so `train.py`'s `backbone.dino` 0.1×-LR match still works.
+The three `config.joint_dino*.yaml` now default to `dinov3_vits16`; set `dino_backbone:
+dinov2_vits14` to revert (no auth). Verified by a mock test of the patch-extraction/reshape for all
+three families (no weights downloaded locally); the actual DINOv3/I-JEPA load happens on the
+Linux/GPU box (DINOv3 needs the HF login; I-JEPA needs the GPU).
+
 ---
 
 ## 8.3 The vision-vs-state probe + model selection

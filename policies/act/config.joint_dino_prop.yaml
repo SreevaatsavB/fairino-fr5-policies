@@ -7,7 +7,7 @@ dataset:
   root: "/home/slifold/Desktop/red_lerobot_joint"   # absolute joint actions, wrist+scene
   chunk_size: 100
   use_image: true
-  image_size: [224, 224]     # 224 = 14*16 -> DINOv2 patch14 gives a 16x16 feature map
+  image_size: [224, 224]     # 224/16 -> DINOv3 patch16 gives a 14x14 feature map
   frame_stride: 5            # match convert_episodes --extract-stride 5
   val_frac: 0.2
   camera_names: [wrist_cam, scene_cam]
@@ -26,7 +26,7 @@ model:
   temporal_ensemble_coeff: 0.01
   proprio_mode: dropout          # zero the joint state 50% of the time -> vision-forced
   proprio_dropout_rate: 0.5
-  dino_backbone: dinov2_vits14   # FROZEN DINOv2 ViT-S/14 backbone
+  dino_backbone: dinov3_vits16   # DINOv3 ViT-S/16 (21M, GATED: huggingface-cli login). Fallback: dinov2_vits14
 
 training:
   batch_size: 8

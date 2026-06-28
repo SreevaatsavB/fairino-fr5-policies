@@ -74,10 +74,11 @@ class ACTConfig:
     proprio_mode:         str   = "full"
     proprio_dropout_rate: float = 0.3
 
-    # vision backbone: "" -> lerobot's trainable ResNet18; or a frozen self-supervised
-    # ViT, e.g. "dinov2_vits14" (torch.hub facebookresearch/dinov2).
+    # vision backbone: "" -> lerobot's trainable ResNet18; or a FROZEN self-supervised ViT:
+    #   "dinov2_vits14" (torch.hub), "dinov3_vits16" (HF, gated, the upgrade), "ijepa_vith14"
+    #   (HF, GPU-only), or any "owner/model" HF id. See VisionBackbone.
     dino_backbone: str = ""
-    # number of LAST DINOv2 blocks to fine-tune (0 = fully frozen); >0 trains at 0.1x LR (train.py)
+    # number of LAST ViT blocks to fine-tune (0 = fully frozen); >0 trains at 0.1x LR (train.py)
     dino_trainable_blocks: int = 0
 
 
@@ -125,44 +126,100 @@ def _lerobot_config(cfg: ACTConfig) -> _LRConfig:
     )
 
 
-class DinoV2Backbone(nn.Module):
-    """Frozen DINOv2 ViT as a drop-in for lerobot ACT's ResNet backbone.
+# Short backbone names -> HuggingFace ids (or pass a full "facebook/..." id directly).
+# DINOv3 weights are GATED: `huggingface-cli login` with a token that has accepted the
+# license at huggingface.co/facebook/dinov3-vits16-pretrain-lvd1689m. I-JEPA is open but
+# its smallest public model is ViT-H (~630M) — GPU only.
+_HF_BACKBONES = {
+    "dinov3_vits16": "facebook/dinov3-vits16-pretrain-lvd1689m",   # 21M — upgrade for dinov2_vits14
+    "dinov3_vitb16": "facebook/dinov3-vitb16-pretrain-lvd1689m",   # 86M
+    "dinov3_vitl16": "facebook/dinov3-vitl16-pretrain-lvd1689m",   # 300M
+    "ijepa_vith14":  "facebook/ijepa_vith14_1k",                   # 630M — GPU only
+    "ijepa_vith16":  "facebook/ijepa_vith16_1k",
+}
 
-    lerobot calls `backbone(img)["feature_map"]` and expects (B, C, h, w); DINOv2 emits
-    patch tokens (B, N, D) which we reshape to (B, D, H/14, W/14). The ViT is frozen (no
-    grad, always eval) — only the projection + transformer + heads train, unless
-    `trainable_blocks > 0`, which unfreezes the last N blocks (+ final norm) at 0.1x LR.
+
+class VisionBackbone(nn.Module):
+    """Frozen self-supervised ViT (DINOv2 / DINOv3 / I-JEPA) as a drop-in for lerobot
+    ACT's ResNet backbone.
+
+    lerobot calls `backbone(img)["feature_map"]` and expects (B, C, h, w). Every ViT here
+    emits patch tokens (B, N, D); we reshape them to (B, D, H/patch, W/patch). The ViT is
+    frozen (no grad, always eval) — only the 1x1 projection + transformer + heads train —
+    unless `trainable_blocks > 0`, which unfreezes the last N transformer blocks at 0.1x LR
+    (handled in train.py via the `backbone.dino` name match; the inner net is kept as
+    `self.dino` for that reason regardless of which model it is).
+
+    Backbone selection by `name`:
+      * "dinov2_*"  -> torch.hub facebookresearch/dinov2 (patch 14), the original.
+      * "dinov3_*"  -> HuggingFace AutoModel (patch 16, +CLS +4 register tokens). GATED.
+      * "ijepa_*"   -> HuggingFace AutoModel (patch 14/16). Big (ViT-H).
+      * any "owner/model" string -> loaded verbatim via HuggingFace AutoModel.
     """
 
     def __init__(self, name: str = "dinov2_vits14", trainable_blocks: int = 0):
         super().__init__()
-        self.dino = torch.hub.load("facebookresearch/dinov2", name, verbose=False)
-        self.embed_dim = int(self.dino.embed_dim)
-        self.patch = int(getattr(self.dino, "patch_size", 14))
         self.trainable_blocks = int(trainable_blocks)
+        self.kind = ("dinov2" if name.startswith("dinov2")
+                     else "ijepa" if name.startswith("ijepa")
+                     else "dinov3" if name.startswith("dinov3")
+                     else "hf")
+        if self.kind == "dinov2":
+            self.dino = torch.hub.load("facebookresearch/dinov2", name, verbose=False)
+            self.embed_dim = int(self.dino.embed_dim)
+            self.patch = int(getattr(self.dino, "patch_size", 14))
+        else:                                              # dinov3 / ijepa / explicit HF id
+            from transformers import AutoModel
+            hf_id = _HF_BACKBONES.get(name, name)
+            self.dino = AutoModel.from_pretrained(hf_id)
+            self.embed_dim = int(self.dino.config.hidden_size)
+            self.patch = int(self.dino.config.patch_size)
+
         for p in self.dino.parameters():
             p.requires_grad_(False)
         if self.trainable_blocks > 0:
-            for blk in self.dino.blocks[-self.trainable_blocks:]:
-                for p in blk.parameters():
-                    p.requires_grad_(True)
-            if hasattr(self.dino, "norm"):
-                for p in self.dino.norm.parameters():
-                    p.requires_grad_(True)
+            blocks = self._transformer_blocks()
+            if blocks is not None:
+                for blk in blocks[-self.trainable_blocks:]:
+                    for p in blk.parameters():
+                        p.requires_grad_(True)
+            else:
+                print(f"[VisionBackbone] WARN: couldn't find transformer blocks to unfreeze "
+                      f"for {name!r}; keeping it fully frozen")
         self.dino.eval()
+
+    def _transformer_blocks(self):
+        """Best-effort handle on the ViT's transformer block list across model families."""
+        for path in ("blocks", "layer", "layers", "encoder.layer", "encoder.layers"):
+            obj = self.dino
+            for attr in path.split("."):
+                obj = getattr(obj, attr, None)
+                if obj is None:
+                    break
+            if obj is not None and hasattr(obj, "__len__"):
+                return obj
+        return None
 
     def train(self, mode: bool = True):
         super().train(mode)
         self.dino.eval()   # keep the frozen backbone in eval even when the parent trains
         return self
 
+    def _patch_tokens(self, img: torch.Tensor) -> torch.Tensor:
+        """(B, C, H, W) -> patch tokens (B, N, D), dropping any leading CLS/register tokens."""
+        if self.kind == "dinov2":
+            return self.dino.forward_features(img)["x_norm_patchtokens"]
+        hs = self.dino(pixel_values=img).last_hidden_state          # (B, T, D)
+        n_patch = (img.shape[-2] // self.patch) * (img.shape[-1] // self.patch)
+        return hs[:, hs.shape[1] - n_patch:, :]                     # patches are the trailing tokens
+
     def forward(self, img: torch.Tensor) -> dict:
         if self.trainable_blocks > 0:
-            tok = self.dino.forward_features(img)["x_norm_patchtokens"]
+            tok = self._patch_tokens(img)
         else:
             with torch.no_grad():
-                tok = self.dino.forward_features(img)["x_norm_patchtokens"]
-        B, _, D = tok.shape
+                tok = self._patch_tokens(img)
+        B, N, D = tok.shape
         h = img.shape[-2] // self.patch
         w = img.shape[-1] // self.patch
         fmap = tok.transpose(1, 2).reshape(B, D, h, w).contiguous()
@@ -176,9 +233,10 @@ class ACT(nn.Module):
         self.image_keys = _image_keys(cfg.camera_names)
         self.policy = ACTPolicy(_lerobot_config(cfg))
 
-        # optional: replace lerobot's trainable ResNet with a FROZEN DINOv2 ViT.
+        # optional: replace lerobot's trainable ResNet with a FROZEN self-supervised ViT
+        # (DINOv2 / DINOv3 / I-JEPA — see VisionBackbone).
         if getattr(cfg, "dino_backbone", "") and cfg.use_image:
-            dino = DinoV2Backbone(cfg.dino_backbone,
+            dino = VisionBackbone(cfg.dino_backbone,
                                   trainable_blocks=getattr(cfg, "dino_trainable_blocks", 0))
             self.policy.model.backbone = dino
             self.policy.model.encoder_img_feat_input_proj = nn.Conv2d(
