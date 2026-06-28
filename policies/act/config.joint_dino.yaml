@@ -7,7 +7,7 @@ dataset:
   root: "/home/slifold/Desktop/red_lerobot_joint"   # absolute joint actions, wrist+scene
   chunk_size: 100
   use_image: true
-  image_size: [224, 224]     # 224/16 -> DINOv3 patch16 gives a 14x14 feature map
+  image_size: [448, 448]     # 448/16 -> DINOv3 patch16 gives a 28x28 feature map (higher detail; ~4x tokens)
   frame_stride: 5            # match convert_episodes --extract-stride 5
   val_frac: 0.2
   camera_names: [wrist_cam, scene_cam]

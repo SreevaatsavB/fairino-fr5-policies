@@ -60,6 +60,7 @@ class ACTConfig:
     dropout:            float = 0.1
     chunk_size:              int          = 100
     use_image:               bool         = True
+    image_size:              tuple        = (224, 224)   # resolution fed to the ViT backbone
     kl_weight:               float        = 0.5    # lowered from 10 (was a collapse trigger)
     temporal_ensemble_coeff: float | None = 0.01
 
@@ -93,7 +94,8 @@ def _lerobot_config(cfg: ACTConfig) -> _LRConfig:
     }
     if cfg.use_image:
         for key in _image_keys(cfg.camera_names):
-            input_features[key] = PolicyFeature(type=FeatureType.VISUAL, shape=(3, 224, 224))
+            input_features[key] = PolicyFeature(type=FeatureType.VISUAL,
+                                                shape=(3, *cfg.image_size))
         norm_map[FeatureType.VISUAL] = NormalizationMode.IDENTITY
     else:
         input_features[ENV_KEY] = PolicyFeature(type=FeatureType.ENV, shape=(cfg.state_dim,))
@@ -374,6 +376,7 @@ def build_model(cfg: dict, stats: dict, device) -> "ACT":
         dropout=m["dropout"],
         chunk_size=d["chunk_size"],
         use_image=d["use_image"],
+        image_size=tuple(d.get("image_size", [224, 224])),
         kl_weight=t["kl_weight"],
         temporal_ensemble_coeff=m.get("temporal_ensemble_coeff"),
         kl_warmup_steps=t.get("kl_warmup_steps", 2000),
