@@ -1,0 +1,45 @@
+# ACT + FROZEN DINOv2 vision backbone, ABSOLUTE JOINT-position actions, 2 cameras.
+# Replaces lerobot's trainable ResNet18 with frozen DINOv2 ViT-S/14 features (strong
+# pretrained perception → attacks the from-scratch localization weakness). Only the
+# projection + transformer + action heads train. Includes the CVAE KL-collapse fix
+# (see docs/failure_analysis/). No gripper-dropout. Score on the rollout, never MAE.
+dataset:
+  root: "/home/slifold/Desktop/red_lerobot_joint"   # absolute joint actions, wrist+scene
+  chunk_size: 100
+  use_image: true
+  image_size: [224, 224]     # 224 = 14*16 -> DINOv2 patch14 gives a 16x16 feature map
+  frame_stride: 5            # match convert_episodes --extract-stride 5
+  val_frac: 0.2
+  camera_names: [wrist_cam, scene_cam]
+  aug_level: photometric
+
+model:
+  state_dim: 7               # 6 actual joints + gripper
+  action_dim: 7              # 6 ABSOLUTE commanded joints (deg) + gripper
+  latent_dim: 32
+  d_model: 512
+  nhead: 8
+  num_encoder_layers: 4
+  num_decoder_layers: 7
+  dim_feedforward: 3200
+  dropout: 0.1
+  temporal_ensemble_coeff: 0.01
+  proprio_mode: full
+  proprio_dropout_rate: 0.3
+  dino_backbone: dinov2_vits14   # FROZEN DINOv2 ViT-S/14 backbone
+
+training:
+  batch_size: 8
+  lr: 1.0e-5
+  weight_decay: 1.0e-4
+  max_epochs: 100
+  grad_clip: 10.0
+  # CVAE KL fix (was kl_weight: 10.0 -> posterior collapse). See docs/failure_analysis/06.
+  kl_weight: 0.5
+  kl_warmup_steps: 2000
+  kl_free_bits: 0.1
+  save_every: 5
+  log_every: 100
+  checkpoint_dir: "policies/act/checkpoints_joint_dino"
+  device: "auto"
+  seed: 42

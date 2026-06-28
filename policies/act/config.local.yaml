@@ -29,7 +29,9 @@ training:
   weight_decay: 1.0e-4
   max_epochs: 5
   grad_clip: 10.0
-  kl_weight: 10.0
+  kl_weight: 0.5
+  kl_warmup_steps: 500
+  kl_free_bits: 0.1
   save_every: 1
   log_every: 50
   checkpoint_dir: "policies/act/checkpoints"

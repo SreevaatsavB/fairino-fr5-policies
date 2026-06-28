@@ -159,6 +159,19 @@ def _build_transform(image_size: tuple, aug_level: str) -> _SeededTransform:
             transforms.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD),
         ])
 
+    elif aug_level == "photometric":
+        # PHOTOMETRIC ONLY — brightness, contrast, and blur. No crop, flip,
+        # rotation, saturation, hue, or geometric transform of any kind, so the
+        # marker/bowl positions in pixel space are never moved (required for the
+        # single-marker benchmark). Resize is deterministic (not a random crop).
+        base = transforms.Compose([
+            transforms.Resize(image_size),
+            transforms.ColorJitter(brightness=0.3, contrast=0.3),
+            transforms.RandomApply(
+                [transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))], p=0.5),
+            transforms.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD),
+        ])
+
     elif aug_level == "crops":
         # Parameters calibrated to UMI (real-stanford/universal_manipulation_interface):
         #   brightness=0.3, contrast=0.4, saturation=0.5, hue=0.08
@@ -187,7 +200,8 @@ def _build_transform(image_size: tuple, aug_level: str) -> _SeededTransform:
         ])
 
     else:
-        raise ValueError(f"unknown aug_level {aug_level!r}; use 'none', 'crops', or 'full'")
+        raise ValueError(f"unknown aug_level {aug_level!r}; use 'none', "
+                         "'photometric', 'crops', or 'full'")
 
     return _SeededTransform(base)
 
@@ -211,16 +225,27 @@ class FR5Dataset(Dataset):
 
     def __init__(self, root, chunk_size=100, use_image=True,
                  image_size=(224, 224), episode_indices=None,
-                 aug_level="none", n_obs_steps=1):
+                 aug_level="none", n_obs_steps=1, frame_stride=1):
         self.root        = Path(root)
         self.chunk_size  = chunk_size
         self.use_image   = use_image
         self.image_size  = image_size
         self.aug_level   = aug_level
         self.n_obs_steps = n_obs_steps
+        # take every Kth frame as a training START sample (the 30 Hz capture is
+        # heavily oversampled; chunks are still predicted at the full rate). Must
+        # match convert_episodes --extract-stride so the start-frame JPEGs exist.
+        self.frame_stride = max(1, int(frame_stride))
 
         with open(self.root / "meta/info.json") as f:
             self.info = json.load(f)
+
+        # camera keys present in the dataset (one or many). Derived from the
+        # feature list so adding the scene cam needs no code change here.
+        self.camera_keys = [k for k in self.info.get("features", {})
+                            if k.startswith("observation.images.")]
+        if not self.camera_keys:
+            self.camera_keys = [VIDEO_KEY]
 
         self.df = pq.read_table(
             self.root / "data/chunk-000/file-000.parquet"
@@ -253,7 +278,7 @@ class FR5Dataset(Dataset):
             ep_idx = int(ep["episode_index"])
             from_i = int(ep["dataset_from_index"])
             to_i   = int(ep["dataset_to_index"])
-            for t in range(from_i, to_i):
+            for t in range(from_i, to_i, self.frame_stride):
                 samples.append((ep_idx, t, from_i, to_i))
         return samples
 
@@ -295,19 +320,25 @@ class FR5Dataset(Dataset):
 
             if self.n_obs_steps == 1:
                 frame_in_ep = int(row["frame_index"])
-                img = self._load_frame(ep_idx, frame_in_ep, aug_seed)
-                if img is None:
-                    # keep the batch collatable if a single frame is unreadable —
-                    # fall back to a black frame (rare; pre-extracted frames are reliable)
-                    print(f"[dataset] WARN: missing frame ep{ep_idx} idx{frame_in_ep}, using zeros")
-                    img = torch.zeros(3, *self.image_size)
-                sample["observation.image"] = img
+                # load EVERY camera under its own dataset key (wrist + scene).
+                # Each camera gets an independent augmentation draw.
+                for cam_key in self.camera_keys:
+                    cam_seed = (random.randint(0, 2**31)
+                                if self.aug_level != "none" else None)
+                    img = self._load_frame(cam_key, ep_idx, frame_in_ep, cam_seed)
+                    if img is None:
+                        print(f"[dataset] WARN: missing {cam_key} ep{ep_idx} "
+                              f"idx{frame_in_ep}, using zeros")
+                        img = torch.zeros(3, *self.image_size)
+                    sample[cam_key] = img
             else:
                 # Industry standard (UMI, Columbia DP, robomimic): independent
                 # augmentation per frame. Each frame gets its own seed so crop
                 # position, jitter, and background vary across the temporal window.
                 # Pass the same seed to _load_frame only if you want temporally
                 # consistent semantic augmentation (e.g., SVD-based relighting).
+                # multi-step history (single-camera path; ACT uses n_obs_steps=1)
+                cam_key = self.camera_keys[0]
                 frames = []
                 for step in range(self.n_obs_steps - 1, -1, -1):
                     hist_abs  = max(frame_abs - step, ep_from)
@@ -315,20 +346,20 @@ class FR5Dataset(Dataset):
                     frame_idx = int(hist_row["frame_index"])
                     frame_seed = (random.randint(0, 2**31)
                                   if self.aug_level != "none" else None)
-                    img = self._load_frame(ep_idx, frame_idx, frame_seed)
+                    img = self._load_frame(cam_key, ep_idx, frame_idx, frame_seed)
                     frames.append(img if img is not None else torch.zeros(
                         3, *self.image_size))
                 # (n_obs_steps, C, H, W)
-                sample["observation.image"] = torch.stack(frames, dim=0)
+                sample[cam_key] = torch.stack(frames, dim=0)
 
         return sample
 
-    def _load_frame(self, ep_idx: int, frame_idx: int,
+    def _load_frame(self, cam_key: str, ep_idx: int, frame_idx: int,
                     aug_seed: int | None = None) -> torch.Tensor | None:
-        jpg = (self.root / "frames" / VIDEO_KEY /
+        jpg = (self.root / "frames" / cam_key /
                f"ep-{ep_idx:03d}" / f"{frame_idx:06d}.jpg")
         frame = cv2.imread(str(jpg)) if jpg.exists() else \
-                self._read_video_frame(ep_idx, frame_idx)
+                self._read_video_frame(cam_key, ep_idx, frame_idx)
 
         if frame is None:
             return None
@@ -337,8 +368,9 @@ class FR5Dataset(Dataset):
         img   = torch.from_numpy(frame).permute(2, 0, 1).float() / 255.0
         return self._img_transform(img, aug_seed)   # seed ensures temporal consistency
 
-    def _read_video_frame(self, ep_idx: int, frame_idx: int) -> np.ndarray | None:
-        vid = self.root / "videos" / VIDEO_KEY / "chunk-000" / f"file-{ep_idx:03d}.mp4"
+    def _read_video_frame(self, cam_key: str, ep_idx: int,
+                          frame_idx: int) -> np.ndarray | None:
+        vid = self.root / "videos" / cam_key / "chunk-000" / f"file-{ep_idx:03d}.mp4"
         if not vid.exists():
             return None
         cap = cv2.VideoCapture(str(vid))

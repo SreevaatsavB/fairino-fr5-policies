@@ -50,12 +50,13 @@ def build_loaders(cfg):
     n_total = int(tmp.info["total_episodes"])
     train_eps, val_eps = FR5Dataset.episode_split(n_total, d["val_frac"], t["seed"])
 
+    stride = d.get("frame_stride", 1)
     train_ds = FR5Dataset(d["root"], d["chunk_size"], d["use_image"],
                           tuple(d["image_size"]), episode_indices=train_eps,
-                          aug_level=aug)
+                          aug_level=aug, frame_stride=stride)
     val_ds   = FR5Dataset(d["root"], d["chunk_size"], d["use_image"],
                           tuple(d["image_size"]), episode_indices=val_eps,
-                          aug_level="none")   # never augment val
+                          aug_level="none", frame_stride=stride)   # never augment val
 
     train_loader = DataLoader(train_ds, batch_size=t["batch_size"], shuffle=True,
                               num_workers=2, pin_memory=True, drop_last=True)
@@ -89,9 +90,18 @@ def run_epoch(model, loader, optimizer, cfg, device, train=True):
             obs   = batch["observation.state"].to(device)
             acts  = batch["action"].to(device)
             pad   = batch["action_is_pad"].to(device)
-            img   = batch.get("observation.image")
-            if img is not None:
-                img = img.to(device)
+            # collect all camera streams (observation.images.*). Pass a single
+            # tensor when there is ONE camera (back-compat for the single-cam
+            # policies) and a {key: tensor} dict when there are several (e.g. the
+            # 2-camera DINOv2 ACT). Only ACT consumes the dict form.
+            imgs = {k: v.to(device) for k, v in batch.items()
+                    if k.startswith("observation.images.")}
+            if len(imgs) == 1:
+                img = next(iter(imgs.values()))
+            elif len(imgs) > 1:
+                img = imgs
+            else:
+                img = None
             task  = batch.get("task")  # list[str] or None; used by language-conditioned policies
 
             loss, l1, kl = model(obs, acts, pad, img, task=task)
@@ -149,10 +159,22 @@ def main():
     stats = train_ds.get_stats()
     model = build_model(policy_mod, cfg, stats, device)
 
+    # Param groups: a fine-tuned DINOv2 backbone (...backbone.dino.*) trains at 0.1x
+    # LR so the pretrained features adapt gently on a small dataset; the from-scratch
+    # head gets the full LR. With a fully-frozen backbone there are no dino params
+    # with grad, so that group is simply absent (identical to plain AdamW).
+    base_lr = cfg["training"]["lr"]
+    dino_params  = [p for n, p in model.named_parameters()
+                    if p.requires_grad and "backbone.dino" in n]
+    other_params = [p for n, p in model.named_parameters()
+                    if p.requires_grad and "backbone.dino" not in n]
+    groups = [{"params": other_params, "lr": base_lr}]
+    if dino_params:
+        groups.append({"params": dino_params, "lr": base_lr * 0.1})
+        print(f"optimizer: head @ lr={base_lr:g}, DINOv2 fine-tune "
+              f"({len(dino_params)} tensors) @ lr={base_lr * 0.1:g}")
     optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=cfg["training"]["lr"],
-        weight_decay=cfg["training"]["weight_decay"],
+        groups, lr=base_lr, weight_decay=cfg["training"]["weight_decay"],
     )
 
     ckpt_dir = Path(cfg["training"]["checkpoint_dir"])

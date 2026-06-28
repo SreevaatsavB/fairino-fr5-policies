@@ -52,11 +52,12 @@ def stage2_dataset():
     assert s["observation.state"].shape == (7,), s["observation.state"].shape
     assert s["action"].shape == (chunk, 7), s["action"].shape
     assert s["action_is_pad"].shape == (chunk,)
-    assert s["observation.image"].shape == (3, 224, 224), s["observation.image"].shape
+    assert s["observation.images.wrist_cam"].shape == (3, 224, 224), \
+        s["observation.images.wrist_cam"].shape
     stats = ds.get_stats()
     assert stats["state_mean"].shape == (7,) and stats["action_mean"].shape == (7,)
     print(f"      OK  len={len(ds)}  state={tuple(s['observation.state'].shape)}  "
-          f"action={tuple(s['action'].shape)}  image={tuple(s['observation.image'].shape)}")
+          f"action={tuple(s['action'].shape)}  image={tuple(s['observation.images.wrist_cam'].shape)}")
     return stats
 
 

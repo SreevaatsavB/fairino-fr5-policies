@@ -33,3 +33,9 @@ checkpoints_smoke/
 NEXT_MODELS.md
 AUGMENTATION.md
 CONTROL_FREQUENCIES.md
+
+.venv*
+.venv-octo*
+# extracted experiment data (logs + episodes; large, keep out of git)
+experiment_data/
+*.zip
