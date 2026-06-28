@@ -81,7 +81,10 @@ produced the phantom "mean" reach + mid-air grasp (file 2 §2.3). Keep `z` alive
 mode → less object-blind averaging.
 
 ### How to verify (Linux/GPU box)
-- Watch KL during training: it should **level off above zero** (~0.5–5), not crash `0.21 → 0.0001`.
+- Every run writes a per-epoch **`<checkpoint_dir>/metrics.csv`** (`train_l1, train_kl, val_l1,
+  kl_weight_eff, lr, seconds`). Plot it: **`python tools/plot_metrics.py <checkpoint_dir>`** — it
+  saves a PNG and prints a verdict. The KL should **level off above zero** (~0.5–5), not crash
+  `0.21 → 0.0001`. (The plotter flags `final KL >= 0.1 -> HEALTHY` vs `-> COLLAPSED`.)
 - Feed the **same** image with two different `z` samples → the predicted action chunk should
   **visibly differ** (proof `z` is being used).
 

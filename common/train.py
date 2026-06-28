@@ -1,4 +1,5 @@
 import argparse
+import csv
 import importlib.util
 import time
 from pathlib import Path
@@ -180,6 +181,16 @@ def main():
     ckpt_dir = Path(cfg["training"]["checkpoint_dir"])
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
+    # per-epoch metrics log (plot with tools/plot_metrics.py). kl_weight_eff is the
+    # *annealed* KL weight at epoch end (ACT only) so the KL curve is interpretable.
+    metrics_path = ckpt_dir / "metrics.csv"
+    metrics_header = ["epoch", "train_l1", "train_kl", "val_l1",
+                      "kl_weight_eff", "lr", "seconds"]
+    if not metrics_path.exists():
+        with open(metrics_path, "w", newline="") as f:
+            csv.writer(f).writerow(metrics_header)
+    print(f"metrics -> {metrics_path}")
+
     best_val = float("inf")
     max_ep   = cfg["training"]["max_epochs"]
     save_n   = cfg["training"]["save_every"]
@@ -194,6 +205,15 @@ def main():
         elapsed = time.time() - t0
         print(f"  train l1={train_l1:.4f}  kl={train_kl:.4f}  "
               f"val l1={val_l1:.4f}  ({elapsed:.0f}s)")
+
+        # append the epoch's metrics to the CSV. kl_weight_eff = the annealed CVAE
+        # weight at this point (ACT only; blank for policies without the schedule).
+        kl_eff = ""
+        if all(hasattr(model, a) for a in ("_kl_step", "kl_weight", "kl_warmup_steps")):
+            kl_eff = f"{model.kl_weight * min(1.0, float(model._kl_step.item()) / model.kl_warmup_steps):.4f}"
+        with open(metrics_path, "a", newline="") as f:
+            csv.writer(f).writerow([epoch, f"{train_l1:.6f}", f"{train_kl:.6f}",
+                                    f"{val_l1:.6f}", kl_eff, base_lr, f"{elapsed:.1f}"])
 
         is_best = val_l1 < best_val
         if is_best:
