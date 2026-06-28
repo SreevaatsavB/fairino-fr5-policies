@@ -1,7 +1,12 @@
 import argparse
 import csv
 import importlib.util
+import json
+import platform
+import subprocess
+import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -12,6 +17,61 @@ from torch.utils.data import DataLoader
 from dataset import FR5Dataset
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _git_info():
+    """Best-effort git provenance so a checkpoint can be traced to exact source."""
+    def _run(*a):
+        try:
+            return subprocess.check_output(a, cwd=REPO_ROOT,
+                                           stderr=subprocess.DEVNULL).decode().strip()
+        except Exception:
+            return None
+    return {
+        "commit": _run("git", "rev-parse", "HEAD"),
+        "branch": _run("git", "rev-parse", "--abbrev-ref", "HEAD"),
+        "dirty": bool(_run("git", "status", "--porcelain")),  # uncommitted changes present
+    }
+
+
+def write_run_info(ckpt_dir, args, cfg, config_path, device, model,
+                   train_loader, val_loader, train_ds, stats):
+    """Snapshot everything needed to reproduce / error-analyse this run.
+
+    Written once at start to <ckpt_dir>/run_info.json. Pairs with metrics.csv
+    (per-epoch curves) so any later deploy failure can be tied back to the exact
+    code, config, data split, and environment that produced the checkpoint.
+    """
+    n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    info = {
+        "timestamp":   datetime.now().isoformat(timespec="seconds"),
+        "policy":      args.policy,
+        "config_path": str(config_path),
+        "argv":        sys.argv,
+        "git":         _git_info(),
+        "device":      str(device),
+        "torch":       torch.__version__,
+        "python":      platform.python_version(),
+        "platform":    platform.platform(),
+        "trainable_params": n_train,
+        "data": {
+            "root":            cfg["dataset"]["root"],
+            "action_space":    train_ds.info.get("action_space", "joint"),
+            "total_episodes":  int(train_ds.info.get("total_episodes", 0)),
+            "train_frames":    len(train_loader.dataset),
+            "val_frames":      len(val_loader.dataset),
+            "frame_stride":    cfg["dataset"].get("frame_stride", 1),
+            "image_size":      cfg["dataset"].get("image_size"),
+            "use_image":       cfg["dataset"].get("use_image"),
+        },
+        # stats are JSON-unfriendly tensors; record shapes + mean/std summaries only
+        "stats_keys":  sorted(stats.keys()) if isinstance(stats, dict) else None,
+        "config":      cfg,   # full resolved config (post proprio overrides)
+    }
+    path = Path(ckpt_dir) / "run_info.json"
+    with open(path, "w") as f:
+        json.dump(info, f, indent=2, default=str)
+    print(f"run info -> {path}")
 
 
 def load_policy_module(policy: str):
@@ -81,7 +141,7 @@ def run_epoch(model, loader, optimizer, cfg, device, train=True):
     clip  = cfg["training"]["grad_clip"]
     log_n = cfg["training"]["log_every"]
 
-    total_l1 = total_kl = 0.0
+    total_l1 = total_kl = total_gn = 0.0
 
     # lerobot's ACTPolicy.forward already folds kl_weight into `loss`, so we
     # backprop it directly; l1 / kl come back as floats for logging only.
@@ -110,8 +170,11 @@ def run_epoch(model, loader, optimizer, cfg, device, train=True):
             if train:
                 optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), clip)
+                # clip_grad_norm_ returns the total grad norm *before* clipping —
+                # log it as an instability signal (a sudden spike precedes divergence).
+                gn = nn.utils.clip_grad_norm_(model.parameters(), clip)
                 optimizer.step()
+                total_gn += float(gn)
 
             total_l1 += l1
             total_kl += kl
@@ -120,7 +183,8 @@ def run_epoch(model, loader, optimizer, cfg, device, train=True):
                 print(f"    step {step+1}/{len(loader)}  "
                       f"l1={l1:.4f}  kl={kl:.4f}")
 
-    return total_l1 / len(loader), total_kl / len(loader)
+    n = len(loader)
+    return total_l1 / n, total_kl / n, (total_gn / n if train else float("nan"))
 
 
 def main():
@@ -184,12 +248,16 @@ def main():
     # per-epoch metrics log (plot with tools/plot_metrics.py). kl_weight_eff is the
     # *annealed* KL weight at epoch end (ACT only) so the KL curve is interpretable.
     metrics_path = ckpt_dir / "metrics.csv"
-    metrics_header = ["epoch", "train_l1", "train_kl", "val_l1",
-                      "kl_weight_eff", "lr", "seconds"]
+    metrics_header = ["epoch", "train_l1", "train_kl", "val_l1", "val_kl",
+                      "train_val_gap", "grad_norm", "kl_weight_eff", "lr", "seconds"]
     if not metrics_path.exists():
         with open(metrics_path, "w", newline="") as f:
             csv.writer(f).writerow(metrics_header)
     print(f"metrics -> {metrics_path}")
+
+    # one-time provenance snapshot for reproducibility / error analysis
+    write_run_info(ckpt_dir, args, cfg, config_path, device, model,
+                   train_loader, val_loader, train_ds, stats)
 
     best_val = float("inf")
     max_ep   = cfg["training"]["max_epochs"]
@@ -199,21 +267,27 @@ def main():
         t0 = time.time()
 
         print(f"\nepoch {epoch}/{max_ep}")
-        train_l1, train_kl = run_epoch(model, train_loader, optimizer, cfg, device, train=True)
-        val_l1,   _        = run_epoch(model, val_loader,   optimizer, cfg, device, train=False)
+        train_l1, train_kl, grad_norm = run_epoch(model, train_loader, optimizer, cfg, device, train=True)
+        val_l1,   val_kl,   _         = run_epoch(model, val_loader,   optimizer, cfg, device, train=False)
 
         elapsed = time.time() - t0
         print(f"  train l1={train_l1:.4f}  kl={train_kl:.4f}  "
-              f"val l1={val_l1:.4f}  ({elapsed:.0f}s)")
+              f"val l1={val_l1:.4f}  gap={val_l1 - train_l1:+.4f}  "
+              f"|g|={grad_norm:.2f}  ({elapsed:.0f}s)")
 
         # append the epoch's metrics to the CSV. kl_weight_eff = the annealed CVAE
         # weight at this point (ACT only; blank for policies without the schedule).
+        # val_kl, grad_norm, and the train/val gap are logged for error analysis:
+        # val_kl rising while train_kl stays low = latent overfitting; a grad_norm
+        # spike precedes divergence; gap is the overfitting signal (doc 09).
         kl_eff = ""
         if all(hasattr(model, a) for a in ("_kl_step", "kl_weight", "kl_warmup_steps")):
             kl_eff = f"{model.kl_weight * min(1.0, float(model._kl_step.item()) / model.kl_warmup_steps):.4f}"
         with open(metrics_path, "a", newline="") as f:
             csv.writer(f).writerow([epoch, f"{train_l1:.6f}", f"{train_kl:.6f}",
-                                    f"{val_l1:.6f}", kl_eff, base_lr, f"{elapsed:.1f}"])
+                                    f"{val_l1:.6f}", f"{val_kl:.6f}",
+                                    f"{val_l1 - train_l1:.6f}", f"{grad_norm:.4f}",
+                                    kl_eff, base_lr, f"{elapsed:.1f}"])
 
         is_best = val_l1 < best_val
         if is_best:

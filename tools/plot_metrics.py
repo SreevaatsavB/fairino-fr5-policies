@@ -37,6 +37,7 @@ def main():
         return [float(r[k]) if r.get(k) not in (None, "") else float("nan") for r in rows]
 
     train_l1, val_l1, train_kl, kl_w = col("train_l1"), col("val_l1"), col("train_kl"), col("kl_weight_eff")
+    val_kl = col("val_kl")   # added for error analysis; absent in older runs -> all-NaN
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.2))
 
@@ -48,6 +49,8 @@ def main():
 
     # right: CVAE KL — should stabilise in the healthy band, not collapse
     ax2.plot(ep, train_kl, color="tab:red", label="train KL")
+    if any(k == k for k in val_kl):                      # plot val KL if the run logged it
+        ax2.plot(ep, val_kl, color="tab:orange", ls=":", label="val KL")
     ax2.axhspan(0.5, 5, color="green", alpha=.12, label="healthy band (0.5-5)")
     if any(k == k for k in kl_w):                       # overlay the annealed weight if present
         ax2b = ax2.twinx()

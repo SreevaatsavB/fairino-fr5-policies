@@ -81,12 +81,24 @@ produced the phantom "mean" reach + mid-air grasp (file 2 §2.3). Keep `z` alive
 mode → less object-blind averaging.
 
 ### How to verify (Linux/GPU box)
-- Every run writes a per-epoch **`<checkpoint_dir>/metrics.csv`** (`train_l1, train_kl, val_l1,
-  kl_weight_eff, lr, seconds`). Plot it: **`python tools/plot_metrics.py <checkpoint_dir>`** — it
-  saves a PNG and prints a verdict. The KL should **level off above zero** (~0.5–5), not crash
-  `0.21 → 0.0001`. (The plotter flags `final KL >= 0.1 -> HEALTHY` vs `-> COLLAPSED`.)
+- Every run writes a per-epoch **`<checkpoint_dir>/metrics.csv`** with the columns
+  `train_l1, train_kl, val_l1, val_kl, train_val_gap, grad_norm, kl_weight_eff, lr, seconds`.
+  Plot it: **`python tools/plot_metrics.py <checkpoint_dir>`** — it saves a PNG and prints a
+  verdict. The KL should **level off above zero** (~0.5–5), not crash `0.21 → 0.0001`. (The
+  plotter flags `final KL >= 0.1 -> HEALTHY` vs `-> COLLAPSED`.)
 - Feed the **same** image with two different `z` samples → the predicted action chunk should
   **visibly differ** (proof `z` is being used).
+
+### Logging captured for error analysis (next runs)
+Every run also drops a one-time **`<checkpoint_dir>/run_info.json`** provenance snapshot:
+timestamp, **git commit/branch/dirty**, exact resolved config, dataset root + `action_space` +
+train/val frame counts + `frame_stride` + `image_size`, device, torch/python/platform, and the
+trainable-param count. This ties any later deploy failure back to *exactly* the code, config,
+data split, and environment that produced the checkpoint. The extra `metrics.csv` columns are
+the in-training diagnostics: **`val_kl`** (rising while `train_kl` stays low ⇒ the latent is
+overfitting), **`grad_norm`** (a sudden spike precedes divergence), and **`train_val_gap`** (the
+overfitting signal — file 9). Together with the existing checkpoint payload (`config`, `stats`,
+`action_space`, `val_l1`) this is everything needed to error-analyse a run after the fact.
 
 ---
 
