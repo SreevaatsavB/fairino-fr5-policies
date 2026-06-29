@@ -5,6 +5,10 @@ plain-English deep dives on each policy in this repo — what it is, how it work
 > **how they differ at deployment** — query cadence, temporal ensembling, action queues, the
 > 30 Hz budget, and per-model latency are compared in one place in [`inference.md`](inference.md).
 >
+> **evaluating a trained policy** — log predicted actions over time (robot) and compare
+> prediction vs ground truth on the held-out test set (per-dim plots + MAE) with the shared
+> action-logging layer: [`evaluation.md`](evaluation.md).
+>
 > **want to learn by coding?** [`exercises/`](exercises/) has from-scratch PyTorch exercises
 > (attention, CVAE, DDPM/DDIM, flow matching, DiT/AdaLN, FAST tokenization, temporal ensembling)
 > with stubs + self-checks + tested solutions. run `python docs/exercises/check_all.py`.

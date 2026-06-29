@@ -31,6 +31,14 @@ from config import (
     GRIPPER_VEL_PCT, GRIPPER_FORCE_PCT, GRIPPER_MAXTIME_MS,
 )
 
+sys.path.insert(0, str(REPO_ROOT / "common"))
+from action_record import ActionRecorder  # noqa: E402
+
+
+def _timestamp() -> str:
+    from datetime import datetime
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
 
 def _load_policy_module(policy: str):
     path = REPO_ROOT / "policies" / policy / "model.py"
@@ -69,7 +77,7 @@ def load_policy(ckpt_path: str, device: torch.device):
     action_space = ckpt.get("action_space", "joint")
     print(f"loaded {policy} checkpoint  epoch={ckpt['epoch']}  "
           f"val_l1={ckpt['val_l1']:.4f}  action_space={action_space}")
-    return model, cfg_dict, action_space
+    return model, cfg_dict, action_space, policy
 
 
 # ── camera ────────────────────────────────────────────────────────────────────
@@ -147,8 +155,19 @@ def run(args):
                           "mps"  if torch.backends.mps.is_available() else "cpu")
     print(f"device: {device}")
 
-    model, cfg_dict, action_space = load_policy(args.checkpoint, device)
+    model, cfg_dict, action_space, policy = load_policy(args.checkpoint, device)
     use_image = cfg_dict["dataset"]["use_image"] and not args.no_image
+
+    # Record every predicted action over the rollout (shared schema with the offline
+    # eval). Saved on exit — including Ctrl-C — so a rollout is never lost. Plot with
+    # tools/plot_actions.py. There is no ground truth on the robot, so this is the
+    # prediction-only view of "what the policy commanded over time".
+    recorder = None
+    if not args.no_log:
+        recorder = ActionRecorder(action_space=action_space, policy=policy,
+                                  source="deploy",
+                                  extra_meta={"checkpoint": str(args.checkpoint),
+                                              "task": args.task})
 
     # Language-conditioned policies (dit_flow, pi0, pi05, pi0_fast) need the task
     # instruction at inference, matching what they were trained on. ACT / Diffusion
@@ -223,6 +242,7 @@ def run(args):
 
                 # ── execute ───────────────────────────────────────────────────
                 gripper.update(gripper_cmd)   # no-op unless threshold crossed
+                ik_failed = False
                 if action_space == "delta_eef":
                     # action[:6] = TCP pose delta [dx,dy,dz (mm), drx,dry,drz (deg)].
                     # Apply to the CURRENT measured pose, then IK -> joints -> servo.
@@ -235,9 +255,17 @@ def run(args):
                         # unreachable / singular target — hold last pose instead of crashing
                         print(f"[IK] {e} — holding pose")
                         joints_cmd = robot.get_joint_positions()
+                        ik_failed = True
                 else:  # "joint"
                     joints_cmd = action[:6].tolist()
                     robot.servo_j(joints_cmd)
+
+                if recorder is not None:
+                    # executed = the 6 joints actually commanded + the gripper command,
+                    # so it lines up dimension-for-dimension with the predicted action.
+                    recorder.add(t=step, state=state_vec, pred=action,
+                                 executed=list(joints_cmd) + [gripper_cmd],
+                                 gripper=gripper_cmd, ik_failed=ik_failed)
 
                 step += 1
 
@@ -259,6 +287,12 @@ def run(args):
     finally:
         if camera is not None:
             camera.stop()
+        # save the rollout even if interrupted, so no run is lost
+        if recorder is not None and len(recorder) > 0:
+            out_dir = Path(args.checkpoint).parent / "rollouts"
+            path = recorder.save(out_dir / f"deploy_{_timestamp()}.npz")
+            print(f"[LOG] saved {len(recorder)} steps -> {path}")
+            print(f"      plot:  python tools/plot_actions.py {path}")
 
     print("done")
 
@@ -270,6 +304,8 @@ def main():
                         help="number of policy steps to run (default 150 = 5s at 30 Hz)")
     parser.add_argument("--no-image",   action="store_true",
                         help="ignore camera even if checkpoint was trained with images")
+    parser.add_argument("--no-log",     action="store_true",
+                        help="do not record predicted actions to <ckpt_dir>/rollouts/")
     parser.add_argument("--task", default="pick up the block and place it in the bin",
                         help="language instruction for language-conditioned policies "
                              "(dit_flow / pi0 / pi05 / pi0_fast); ignored by ACT / Diffusion")

@@ -188,3 +188,13 @@ compute, but more open-loop (blind to changes until the next re-query).
 See also: each policy's own doc (`act.md`, `diffusion_policy.md`, `dit_flow.md`, `pi0.md`,
 `pi0_fast.md`) for the training-time math, and `tools/test_inference.py` for a hardware-free
 multi-step rollout that exercises these exact paths.
+
+---
+
+## 9. logging & evaluating the actions
+
+Every `deploy.py` rollout now records its predicted actions to `<ckpt_dir>/rollouts/` (plot
+with `tools/plot_actions.py`), and `experiments/eval_on_test.py` replays the held-out test
+episodes to plot **prediction vs ground truth** per action dimension over time (with per-dim
+MAE). Both share one record format (`common/action_record.py`). See
+[`evaluation.md`](evaluation.md) for the full layer, commands, and the open-loop caveat.
