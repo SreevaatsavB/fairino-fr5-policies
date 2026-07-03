@@ -154,7 +154,8 @@ def run_epoch(model, loader, optimizer, cfg, device, train=True):
             # collect all camera streams (observation.images.*). Pass a single
             # tensor when there is ONE camera (back-compat for the single-cam
             # policies) and a {key: tensor} dict when there are several (e.g. the
-            # 2-camera DINOv2 ACT). Only ACT consumes the dict form.
+            # 2-camera DINOv2 ACT / 2-camera pi0). Both consume the dict form via
+            # their own camera_names/image_keys wiring.
             imgs = {k: v.to(device) for k, v in batch.items()
                     if k.startswith("observation.images.")}
             if len(imgs) == 1:

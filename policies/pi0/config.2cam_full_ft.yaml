@@ -1,0 +1,52 @@
+# π0 + 2 cameras (wrist + scene), FULL fine-tune (VLM + action expert both trainable).
+# ⚠️  REQUIRES PALIGEMMA WEIGHTS (~5 GB, gated HuggingFace download):
+#     huggingface-cli login
+#     # accept licence: https://huggingface.co/google/paligemma-3b-pt-224
+# Run from repo root:
+#     python common/train.py --policy pi0 --config policies/pi0/config.2cam_full_ft.yaml
+#
+# Use this only once config.2cam.yaml (frozen VLM) is not enough — full fine-tune of the
+# 2.3B-param model needs more data and GPU memory (reduce batch_size / use grad
+# accumulation if OOM) and a lower LR (full-VLM fine-tunes are typically 5-10x lower LR
+# than head/expert-only fine-tunes — see docs/pi0.md). Higher risk of overfitting /
+# catastrophic forgetting on a small FR5 dataset; watch val loss closely.
+dataset:
+  root: "/home/slifold/Desktop/red_lerobot_joint"   # absolute joint actions, wrist+scene
+  chunk_size: 50
+  use_image: true
+  image_size: [224, 224]
+  frame_stride: 5
+  val_frac: 0.2
+  camera_names: [wrist_cam, scene_cam]
+  aug_level: "crops"
+
+model:
+  state_dim: 7
+  action_dim: 7
+
+  paligemma_variant: "gemma_2b"
+  action_expert_variant: "gemma_300m"
+  max_state_dim: 32
+  max_action_dim: 32
+  tokenizer_max_length: 48
+
+  num_inference_steps: 10
+
+  # fine-tuning strategy: everything trainable (2B VLM + 300M action expert).
+  train_expert_only: false
+  freeze_vision_encoder: false
+
+  proprio_mode: full
+  proprio_dropout_rate: 0.3
+
+training:
+  batch_size: 2             # full FT of 2.3B params + 2 cameras — reduce further if OOM
+  lr: 5.0e-6                 # lower than expert-only FT; full-VLM fine-tunes need a gentle LR
+  weight_decay: 0.01
+  max_epochs: 100
+  grad_clip: 1.0
+  save_every: 10
+  log_every: 50
+  checkpoint_dir: "policies/pi0/checkpoints_2cam_full_ft"
+  device: "cuda"
+  seed: 42

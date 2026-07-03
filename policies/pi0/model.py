@@ -53,10 +53,17 @@ except ImportError:
     _HAS_TOKENIZER = False
 
 STATE_KEY      = "observation.state"
-IMAGE_KEY      = "observation.images.wrist_cam"
+IMAGE_KEY      = "observation.images.wrist_cam"   # default single-cam key (back-compat)
 ACTION_KEY     = "action"
 LANG_TOKENS    = "observation.language.tokens"
 LANG_ATTN_MASK = "observation.language.attention_mask"
+
+
+def _image_keys(camera_names) -> list:
+    """['wrist_cam','scene_cam'] -> ['observation.images.wrist_cam', 'observation.images.scene_cam'].
+    Same convention as policies/act/model.py, so multi-camera configs are consistent
+    across policies."""
+    return [f"observation.images.{c}" for c in camera_names]
 
 _IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
 _IMAGENET_STD  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
@@ -82,6 +89,20 @@ class Pi0Config:
     action_expert_variant: str = "gemma_300m"
     tokenizer_max_length:  int = 48
 
+    # cameras fed as pi0 image inputs (PI0Policy natively supports N cameras — it reads
+    # one SigLIP embedding per observation.images.* key present in the batch).
+    camera_names: tuple = ("wrist_cam",)
+
+    # fine-tuning strategy for the PaliGemma VLM (both flags exist on lerobot's PI0Config;
+    # exposed here so a config file can pick one without editing this wrapper):
+    #   train_expert_only=True     -> freeze the whole 2B VLM, train only the 300M action
+    #                                  expert + projections. Cheap, safe default for a small
+    #                                  FR5 dataset (low OOM risk, no catastrophic forgetting).
+    #   freeze_vision_encoder=True -> freeze only SigLIP; the Gemma LMs still train.
+    #   both False                 -> full fine-tune (needs more data/GPU budget).
+    train_expert_only:     bool = True
+    freeze_vision_encoder: bool = False
+
     # proprioception handling (see common/proprio.py): full | dropout | none
     proprio_mode:         str   = "full"
     proprio_dropout_rate: float = 0.3
@@ -96,8 +117,9 @@ def _lerobot_config(cfg: Pi0Config) -> _LRConfig:
         "ACTION": NormalizationMode.IDENTITY,
     }
     if cfg.use_image:
-        input_features[IMAGE_KEY] = PolicyFeature(type=FeatureType.VISUAL,
-                                                   shape=(3, 224, 224))
+        for key in _image_keys(cfg.camera_names):
+            input_features[key] = PolicyFeature(type=FeatureType.VISUAL,
+                                                shape=(3, 224, 224))
         norm_map["VISUAL"] = NormalizationMode.IDENTITY
 
     return _LRConfig(
@@ -114,14 +136,24 @@ def _lerobot_config(cfg: Pi0Config) -> _LRConfig:
         max_action_dim=cfg.max_action_dim,
         num_inference_steps=cfg.num_inference_steps,
         tokenizer_max_length=cfg.tokenizer_max_length,
+        train_expert_only=cfg.train_expert_only,
+        freeze_vision_encoder=cfg.freeze_vision_encoder,
     )
 
 
 class Pi0(nn.Module):
     def __init__(self, cfg: Pi0Config, stats: dict):
         super().__init__()
-        self.cfg    = cfg
+        self.cfg        = cfg
+        self.image_keys = _image_keys(cfg.camera_names)
         self.policy = PI0Policy(_lerobot_config(cfg))
+
+        n_train = sum(p.numel() for p in self.policy.parameters() if p.requires_grad)
+        strategy = ("train_expert_only (VLM frozen)" if cfg.train_expert_only else
+                   "freeze_vision_encoder (SigLIP frozen)" if cfg.freeze_vision_encoder else
+                   "full fine-tune")
+        print(f"[pi0] cameras={list(cfg.camera_names)}  fine-tune={strategy}  "
+              f"trainable params={n_train/1e6:.1f}M")
 
         # proprioception mode (full | dropout | none) — applied in _make_batch.
         # pi0 always has language conditioning, so 'none' is valid with or without image.
@@ -191,7 +223,15 @@ class Pi0(nn.Module):
         batch = {STATE_KEY: state}                         # (B, state_dim), full/dropout/none
 
         if self.cfg.use_image and obs_image is not None:
-            batch[IMAGE_KEY] = self._to_raw(obs_image)     # (B, C, H, W) in [0,1]
+            # accept a single (B,C,H,W) tensor (1 camera) or a {key: tensor} dict (multi-cam),
+            # same convention as policies/act/model.py. PI0Policy reads one entry per key in
+            # self.config.image_features directly from the batch — no stacking needed.
+            imgs = ({self.image_keys[0]: obs_image} if torch.is_tensor(obs_image)
+                   else obs_image)
+            for key in self.image_keys:
+                if key not in imgs:
+                    raise ValueError(f"missing camera input {key!r}; got {list(imgs)}")
+                batch[key] = self._to_raw(imgs[key])        # (B, C, H, W) in [0,1]
 
         ids, mask = self._tokenize(task, dev)
         batch[LANG_TOKENS]    = ids
@@ -234,6 +274,9 @@ def build_model(cfg: dict, stats: dict, device) -> Pi0:
         paligemma_variant=m.get("paligemma_variant", "gemma_2b"),
         action_expert_variant=m.get("action_expert_variant", "gemma_300m"),
         tokenizer_max_length=m.get("tokenizer_max_length", 48),
+        camera_names=tuple(d.get("camera_names", ["wrist_cam"])),
+        train_expert_only=m.get("train_expert_only", True),
+        freeze_vision_encoder=m.get("freeze_vision_encoder", False),
         proprio_mode=m.get("proprio_mode", "full"),
         proprio_dropout_rate=m.get("proprio_dropout_rate", 0.3),
     )

@@ -724,6 +724,39 @@ standard PaliGemma/illustrative value rather than a config knob, it is marked.
 
 ---
 
+## 14b. Two cameras, and how to fine-tune
+
+The wrapper (`policies/pi0/model.py`) supports any number of cameras through a
+`camera_names` config field — same convention as ACT's `camera_names` (§ `act.md`).
+`PI0Policy` itself already handles this natively: it reads one SigLIP embedding per
+`observation.images.*` key present in the batch, so adding a second camera is purely a
+config change, no architecture change.
+
+```yaml
+dataset:
+  camera_names: [wrist_cam, scene_cam]   # any number of observation.images.<name> keys
+```
+
+Configs: `config.yaml` (1 camera, back-compat) · `config.2cam.yaml` (wrist + scene) ·
+`config.2cam_full_ft.yaml` (wrist + scene, full fine-tune).
+
+**Fine-tuning strategy.** Full π0 is **2.3B parameters** (2B PaliGemma VLM + 300M action
+expert) — too large to safely full-fine-tune on a small robot dataset without real risk of
+catastrophic forgetting / overfitting. `lerobot`'s `PI0Config` exposes two freeze flags,
+plumbed through `Pi0Config` here:
+
+| `train_expert_only` | `freeze_vision_encoder` | What trains | When |
+|---|---|---|---|
+| **`true`** (default) | `false` | Only the 300M action expert + projections. The whole PaliGemma VLM (language **and** vision) is frozen. | **Recommended default.** Cheap, low OOM risk, keeps PaliGemma's pretrained visual/language priors intact — the right choice for a dataset this size. |
+| `false` | `true` | The Gemma language stack + action expert; only SigLIP (vision tower) is frozen. | Middle ground — rarely needed here; not exposed as a separate config, set directly if you want it. |
+| `false` | `false` | Everything (2.3B params). | Only once expert-only fine-tuning has been tried and is insufficient, and you have enough data/GPU budget. Use a much lower LR (`config.2cam_full_ft.yaml` uses `5e-6` vs `2.5e-5` for expert-only) — full-VLM fine-tunes need a gentle LR or they overwrite the pretrained representations fast. |
+
+`policies/pi0/model.py` prints the active strategy and the resulting trainable-parameter
+count at model build time, so you can sanity-check which knob is actually in effect before
+a long training run.
+
+---
+
 ## 15. When to use π0
 
 Use π0 when:

@@ -1,0 +1,57 @@
+# π0 + 2 cameras (wrist + scene), VLM FROZEN — train only the 300M action expert.
+# ⚠️  REQUIRES PALIGEMMA WEIGHTS (~5 GB, gated HuggingFace download):
+#     huggingface-cli login
+#     # accept licence: https://huggingface.co/google/paligemma-3b-pt-224
+# Run from repo root:
+#     python common/train.py --policy pi0 --config policies/pi0/config.2cam.yaml
+#
+# Recommended DEFAULT for fine-tuning on the FR5 dataset: train_expert_only freezes the
+# whole 2B PaliGemma VLM and trains only the 300M flow-matching action expert (+
+# projections). Much lower GPU memory than full fine-tune, far less risk of catastrophic
+# forgetting / overfitting a 2B-param model on a small robot dataset. Same 2-camera
+# dataset as policies/act/config.joint_dino.yaml (wrist_cam + scene_cam, absolute joint
+# actions) — see docs/pi0.md for the fine-tuning-strategy comparison.
+dataset:
+  root: "/home/slifold/Desktop/red_lerobot_joint"   # absolute joint actions, wrist+scene
+  chunk_size: 50            # pi0 default (1.67 s at 30 Hz)
+  use_image: true
+  image_size: [224, 224]    # fixed — SigLIP/PaliGemma resolution; not a tunable knob for pi0
+  frame_stride: 5           # match convert_episodes --extract-stride 5
+  val_frac: 0.2
+  camera_names: [wrist_cam, scene_cam]
+  aug_level: "crops"        # crops only — pi0 uses SigLIP norm internally
+
+model:
+  state_dim: 7               # 6 actual joints + gripper
+  action_dim: 7               # 6 ABSOLUTE commanded joints (deg) + gripper
+
+  # pi0 architecture (must match PaliGemma variant)
+  paligemma_variant: "gemma_2b"
+  action_expert_variant: "gemma_300m"
+  max_state_dim: 32
+  max_action_dim: 32
+  tokenizer_max_length: 48
+
+  # flow-matching inference
+  num_inference_steps: 10
+
+  # fine-tuning strategy: freeze the 2B VLM, train only the action expert. See
+  # config.2cam_full_ft.yaml for the full-fine-tune variant.
+  train_expert_only: true
+  freeze_vision_encoder: false
+
+  # proprioception handling — benchmark axis (see docs/proprioception_modes.md)
+  proprio_mode: full
+  proprio_dropout_rate: 0.3
+
+training:
+  batch_size: 4            # 2 cameras double the per-sample image cost; keep conservative
+  lr: 2.5e-5                # action-expert-only fine-tune; same as the single-cam default
+  weight_decay: 0.01
+  max_epochs: 100
+  grad_clip: 1.0
+  save_every: 10
+  log_every: 50
+  checkpoint_dir: "policies/pi0/checkpoints_2cam"
+  device: "cuda"            # pi0 requires CUDA — too large for CPU/MPS
+  seed: 42
