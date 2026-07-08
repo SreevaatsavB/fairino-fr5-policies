@@ -9,17 +9,20 @@
 # It does NOT use common/train.py or common/deploy.py (those are PyTorch).
 
 model:
-  # Octo team weights. octo-base-1.5 (93M) is the LARGEST official Octo checkpoint
-  # (there is no "octo-large" — only small/base were released). This is the Linux
-  # default. For a quick local/CPU test use the lighter octo-small-1.5 (27M) via
-  # the --model flag, e.g. --model hf://rail-berkeley/octo-small-1.5
-  pretrained: "hf://rail-berkeley/octo-base-1.5"
+  # Octo team weights. octo-small-1.5 (27M) is the default — light enough for
+  # CPU smoke tests and plenty for head-only finetuning on ~150 episodes. The
+  # larger octo-base-1.5 (93M, the LARGEST official checkpoint — there is no
+  # "octo-large") is available via the --model flag,
+  # e.g. --model hf://rail-berkeley/octo-base-1.5
+  pretrained: "hf://rail-berkeley/octo-small-1.5"
   window_size: 2          # frames of history Octo attends over (octo default = 2)
   action_horizon: 4       # future actions predicted per step (octo default = 4)
   action_dim: 7           # FR5: 6 joints (deg) + gripper_norm [0,1]
 
 dataset:
   root: "../so101-fr5-teleop/lerobot_dataset"   # relative to repo root; same dataset as the torch policies
+                                                # (GPU-box path — for a local smoke test use --root lerobot_dataset,
+                                                #  the repo-local 2-episode sample)
   instruction: "pick up the block and place it in the bin"
   image_key: "observation.images.wrist_cam"     # which camera maps to Octo's image_primary
 

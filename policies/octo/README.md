@@ -33,7 +33,8 @@ source .venv-octo/bin/activate
 This installs the `octo` package, JAX, and the pinned `flax/optax/distrax/orbax/
 tensorstore/tensorflow/transformers` stack, plus the lean extras the FR5 data adapter
 needs (`pyarrow/opencv/pandas/pillow`). The Octo team weights download automatically on
-first use from HuggingFace (`rail-berkeley/octo-base-1.5`, ~547 MB; or `octo-small-1.5`).
+first use from HuggingFace (`rail-berkeley/octo-small-1.5`, the default; or the larger
+`octo-base-1.5`, ~547 MB).
 
 ---
 
@@ -42,7 +43,7 @@ first use from HuggingFace (`rail-berkeley/octo-base-1.5`, ~547 MB; or `octo-sma
 ```bash
 python policies/octo/inference_pretrained.py                    # random frame
 python policies/octo/inference_pretrained.py --image frame.jpg  # a real wrist frame
-python policies/octo/inference_pretrained.py --model hf://rail-berkeley/octo-small-1.5
+python policies/octo/inference_pretrained.py --model hf://rail-berkeley/octo-base-1.5
 ```
 
 Loads the pretrained model and runs it on an FR5 wrist image + language instruction.
@@ -117,7 +118,7 @@ chunk (`action[:6]` joints, `action[6]` gripper). See
 
 | Key | Meaning |
 |---|---|
-| `model.pretrained` | Octo team weights — `octo-base-1.5` (93M) or `octo-small-1.5` (27M) |
+| `model.pretrained` | Octo team weights — `octo-small-1.5` (27M, default) or `octo-base-1.5` (93M) |
 | `model.window_size` | history frames (Octo default 2) |
 | `model.action_horizon` | future actions predicted per step (Octo default 4) |
 | `model.action_dim` | 7 = 6 joints + gripper (matches Octo's head) |

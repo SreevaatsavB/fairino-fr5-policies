@@ -10,7 +10,7 @@ dataset:
   use_image: true
   image_size: [224, 224]
   val_frac: 0.1
-  aug_level: "crops"    # DiT uses CLIP vision — background replacement interacts with CLIP norm, use crops only
+  aug_level: "crops"    # keep crops-only; heavier aug (background replacement) untested with the ViT encoders
 
 model:
   state_dim: 7
@@ -25,6 +25,8 @@ model:
   vision_encoder_name: "openai/clip-vit-base-patch16"
   text_encoder_name: "openai/clip-vit-base-patch16"
   tokenizer_max_length: 77
+  dino_backbone: "dinov2_vits14"   # open + CPU-friendly for laptop runs (full-scale config uses dinov3_vits16)
+  dino_trainable_blocks: 0
 
 training:
   batch_size: 8

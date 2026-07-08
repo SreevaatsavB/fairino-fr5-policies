@@ -27,10 +27,20 @@ model:
   num_heads: 8
   dropout: 0.1
 
-  # CLIP encoders (vision + language share the same checkpoint)
+  # CLIP text encoder (language conditioning) + the CLIP id lerobot's config
+  # validation requires for vision even when dino_backbone replaces the tower.
   vision_encoder_name: "openai/clip-vit-base-patch16"
   text_encoder_name: "openai/clip-vit-base-patch16"
   tokenizer_max_length: 77
+
+  # vision backbone — FROZEN self-supervised ViT replacing the CLIP vision tower
+  # (see common/vision_backbone.py + DiTVisionAdapter in model.py).
+  # dinov3_vits16 weights are HF-GATED: `huggingface-cli login` with a token that has
+  # accepted the license at huggingface.co/facebook/dinov3-vits16-pretrain-lvd1689m.
+  # Alternatives: "dinov2_vits14" (open, torch.hub), "ijepa_vith14" (630M, GPU-only —
+  # the smallest public I-JEPA), or unset ("") for the stock CLIP baseline.
+  dino_backbone: "dinov3_vits16"
+  dino_trainable_blocks: 0   # >0 fine-tunes the last N ViT blocks at 0.1x LR
 
   # proprioception handling — benchmark axis (see docs/proprioception_modes.md)
   #   full | dropout | none   (override: python common/train.py --policy dit_flow --proprio none)

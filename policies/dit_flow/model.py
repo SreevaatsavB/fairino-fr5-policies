@@ -5,9 +5,13 @@ Wraps lerobot's MultiTaskDiTPolicy (lerobot==0.5.1) with objective="flow_matchin
 
 Architecture overview
 ─────────────────────
-Observation encoder (CLIP-based)
-  • CLIP ViT-B/16 image encoder  — wrist-cam frames
-  • CLIP text encoder             — language task string
+Observation encoder
+  • Vision encoder — wrist-cam frames. Either:
+      - CLIP ViT-B/16 CLS token (lerobot stock; dino_backbone unset), or
+      - a FROZEN self-supervised ViT (DINOv2 / DINOv3 / I-JEPA) via
+        common/vision_backbone.py, mean-pooled + projected to 768 so it is a
+        drop-in for the CLIP CLS vector (see DiTVisionAdapter; dino_backbone set)
+  • CLIP text encoder             — language task string (independent of vision choice)
   • Linear projection             — joint state (6 DOF)
   → flat conditioning vector per timestep
 
@@ -27,7 +31,8 @@ Inference — Euler ODE integration, t: 0 → 1
 
 Normalization (all done in this wrapper; lerobot policy sees IDENTITY norms)
   • State  / action : min-max  → [-1, 1]
-  • Images : undo ImageNet (from dataset.py) → CLIP normalization
+  • Images : dataset.py emits ImageNet-normed 224x224. CLIP encoder → re-norm to
+    CLIP stats; DINO/I-JEPA backbones expect ImageNet stats → passed through as-is.
   • Language       : CLIPTokenizerFast via AutoTokenizer
 """
 
@@ -47,11 +52,13 @@ from lerobot.configs.types import PolicyFeature, FeatureType, NormalizationMode
 # explicit path so the import works no matter how model.py gets loaded.
 try:
     from proprio import ProprioConfig, mask_state, describe as _describe_proprio
+    from vision_backbone import VisionBackbone
 except ImportError:  # pragma: no cover
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "common"))
     from proprio import ProprioConfig, mask_state, describe as _describe_proprio
+    from vision_backbone import VisionBackbone
 
 
 # ── batch key constants ────────────────────────────────────────────────────────
@@ -88,10 +95,19 @@ class DiTFlowConfig:
     num_heads:      int   = 8
     dropout:        float = 0.1
 
-    # CLIP vision + language encoders
+    # CLIP vision + language encoders. vision_encoder_name must stay a CLIP id even
+    # when dino_backbone is set (lerobot's config validates the name; the CLIP vision
+    # tower it builds is then replaced by DiTVisionAdapter). Text always stays CLIP.
     vision_encoder_name:  str = "openai/clip-vit-base-patch16"
     text_encoder_name:    str = "openai/clip-vit-base-patch16"
     tokenizer_max_length: int = 77
+
+    # vision backbone override: "" -> lerobot's stock CLIP CLS encoder; or a FROZEN
+    # self-supervised ViT: "dinov2_vits14" (torch.hub), "dinov3_vits16" (HF, gated),
+    # "ijepa_vith14" (HF, GPU-only), or any "owner/model" HF id. See common/vision_backbone.py.
+    dino_backbone: str = ""
+    # number of LAST ViT blocks to fine-tune (0 = fully frozen); >0 trains at 0.1x LR (train.py)
+    dino_trainable_blocks: int = 0
 
     # proprioception handling (see common/proprio.py): full | dropout | none
     proprio_mode:         str   = "full"
@@ -136,11 +152,61 @@ def _lerobot_config(cfg: DiTFlowConfig) -> _LRConfig:
     )
 
 
+class DiTVisionAdapter(nn.Module):
+    """Drop-in replacement for lerobot's CLIPVisionEncoder backed by a frozen
+    self-supervised ViT (common/vision_backbone.py).
+
+    lerobot's ObservationEncoder expects `forward(x) -> (B, 768, 1, 1)` (CLIP CLS
+    vector) and sizes the DiT's conditioning_dim from `get_output_shape()` at
+    construction. VisionBackbone emits a patch-token grid (B, D, h, w); we mean-pool
+    it to a global vector and linearly project D -> 768 so conditioning_dim (and the
+    already-built noise_predictor) are unchanged.
+
+    Attribute naming matters: `self.backbone` holds the VisionBackbone whose inner
+    net is `.dino`, so param names contain "backbone.dino" and train.py's 0.1x-LR
+    fine-tune group applies when dino_trainable_blocks > 0.
+    """
+
+    CLIP_EMBED_DIM = 768   # CLIP ViT-B/16 CLS dim the DiT conditioning was sized for
+
+    def __init__(self, name: str, trainable_blocks: int = 0):
+        super().__init__()
+        self.backbone = VisionBackbone(name, trainable_blocks=trainable_blocks)
+        self.embed_dim = self.CLIP_EMBED_DIM
+        self.proj = nn.Linear(self.backbone.embed_dim, self.CLIP_EMBED_DIM)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        fmap = self.backbone(x)["feature_map"]        # (B, D, h, w)
+        pooled = fmap.flatten(2).mean(dim=2)          # (B, D) — mean over patches
+        out = self.proj(pooled)                       # (B, 768)
+        return out.reshape(out.shape[0], self.CLIP_EMBED_DIM, 1, 1)
+
+    def get_output_shape(self) -> tuple:
+        return (self.CLIP_EMBED_DIM, 1, 1)
+
+
 class DiTFlow(nn.Module):
     def __init__(self, cfg: DiTFlowConfig, stats: dict):
         super().__init__()
         self.cfg = cfg
         self.policy = MultiTaskDiTPolicy(_lerobot_config(cfg))
+
+        # optional: replace the stock CLIP vision tower with a FROZEN self-supervised
+        # ViT (DINOv2 / DINOv3 / I-JEPA). Same post-construction surgery as ACT's
+        # backbone swap; the adapter keeps the output at (B, 768, 1, 1) so the DiT's
+        # conditioning_dim — fixed when the policy was built — still matches.
+        self.uses_dino = bool(cfg.dino_backbone) and cfg.use_image
+        if self.uses_dino:
+            adapter = DiTVisionAdapter(cfg.dino_backbone,
+                                       trainable_blocks=cfg.dino_trainable_blocks)
+            enc = self.policy.observation_encoder
+            enc.vision_encoder = adapter
+            enc.vision_encoders = None   # single shared encoder path
+            n_train = sum(p.numel() for p in self.policy.parameters() if p.requires_grad)
+            print(f"[DiT-Flow] vision backbone -> FROZEN {cfg.dino_backbone} "
+                  f"(embed_dim={adapter.backbone.embed_dim}, patch={adapter.backbone.patch}, "
+                  f"projected to {adapter.CLIP_EMBED_DIM}); "
+                  f"trainable params now {n_train/1e6:.1f}M")
 
         # proprioception mode (full | dropout | none) — applied in _make_batch
         self.proprio = ProprioConfig(cfg.proprio_mode, cfg.proprio_dropout_rate)
@@ -228,8 +294,10 @@ class DiTFlow(nn.Module):
         batch = {STATE_KEY: state}
 
         if self.cfg.use_image and obs_image is not None:
-            # Always (B, C, H, W); _prepare_batch and/or the queue adds n_obs_steps
-            batch[IMAGE_KEY] = self._renorm_image(obs_image)
+            # Always (B, C, H, W); _prepare_batch and/or the queue adds n_obs_steps.
+            # dataset.py emits ImageNet-normed images: the DINO/I-JEPA backbones expect
+            # exactly that (pass through), the stock CLIP tower expects CLIP stats.
+            batch[IMAGE_KEY] = obs_image if self.uses_dino else self._renorm_image(obs_image)
 
         # Language tokens — always include so conditioning_dim stays constant.
         # Default to empty strings; CLIP text encoder handles them gracefully.
@@ -293,6 +361,8 @@ def build_model(cfg: dict, stats: dict, device) -> DiTFlow:
         vision_encoder_name=m.get("vision_encoder_name", "openai/clip-vit-base-patch16"),
         text_encoder_name=m.get("text_encoder_name", "openai/clip-vit-base-patch16"),
         tokenizer_max_length=m.get("tokenizer_max_length", 77),
+        dino_backbone=m.get("dino_backbone", "") or "",
+        dino_trainable_blocks=m.get("dino_trainable_blocks", 0),
         proprio_mode=m.get("proprio_mode", "full"),
         proprio_dropout_rate=m.get("proprio_dropout_rate", 0.3),
     )

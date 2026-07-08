@@ -25,6 +25,8 @@ model:
   vision_encoder_name: "openai/clip-vit-base-patch16"
   text_encoder_name: "openai/clip-vit-base-patch16"
   tokenizer_max_length: 77
+  dino_backbone: "dinov2_vits14"   # exercises the DiTVisionAdapter path on CPU
+  dino_trainable_blocks: 0
 
 training:
   batch_size: 2

@@ -22,7 +22,7 @@ try:
 except ImportError:  # pillow fallback
     cv2 = None
 
-DEFAULT_MODEL = "hf://rail-berkeley/octo-base-1.5"   # Octo team weights (93M)
+DEFAULT_MODEL = "hf://rail-berkeley/octo-small-1.5"  # Octo team weights (27M)
 PRIMARY_IMAGE_SIZE = 256                              # Octo image_primary expected H=W
 FR5_INSTRUCTION = "pick up the block and place it in the bin"
 ACTION_DIM = 7                                        # 6 joints (deg) + gripper_norm [0,1]
