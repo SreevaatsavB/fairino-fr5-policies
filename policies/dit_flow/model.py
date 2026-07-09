@@ -46,6 +46,7 @@ from lerobot.policies.multi_task_dit.configuration_multi_task_dit import (
     MultiTaskDiTConfig as _LRConfig,
 )
 from lerobot.policies.multi_task_dit.modeling_multi_task_dit import MultiTaskDiTPolicy
+from lerobot.policies.act.modeling_act import ACTTemporalEnsembler
 from lerobot.configs.types import PolicyFeature, FeatureType, NormalizationMode
 
 # common/ is on sys.path when run via train.py / deploy.py; fall back to an
@@ -89,6 +90,18 @@ class DiTFlowConfig:
     num_integration_steps: int   = 10                # Euler/RK4 ODE steps at inference
     integration_method:    str   = "euler"           # "euler" | "rk4"
 
+    # inference smoothing (no effect on training or weights — safe to change per deploy):
+    #   temporal_ensemble_coeff  ACT-style temporal ensembling: re-predict the full chunk
+    #                            every step and exponentially blend overlapping predictions
+    #                            (w = exp(-coeff*age)). Costs one ODE sample per control
+    #                            step (~5-10 ms CUDA — fine at 30 Hz; ~80 ms CPU — too slow).
+    #                            None disables it.
+    #   n_action_steps           only used when ensembling is off: execute the first k of
+    #                            chunk_size actions, then re-plan (receding horizon).
+    #                            None -> full chunk open-loop (the old, jerky behaviour).
+    temporal_ensemble_coeff: float | None = 0.01
+    n_action_steps:          int   | None = None
+
     # DiT transformer
     hidden_dim:     int   = 512
     num_layers:     int   = 6
@@ -126,11 +139,17 @@ def _lerobot_config(cfg: DiTFlowConfig) -> _LRConfig:
         input_features[IMAGE_KEY] = PolicyFeature(type=FeatureType.VISUAL, shape=(3, 224, 224))
         norm_map["VISUAL"] = NormalizationMode.IDENTITY
 
-    # n_action_steps == horizon → full chunk executed per policy query (ACT-style)
+    # With temporal ensembling the wrapper re-predicts every step and needs the FULL
+    # horizon chunk (lerobot slices _generate_actions output to n_action_steps).
+    # Without it, n_action_steps < horizon gives lerobot's receding-horizon queue.
+    if cfg.temporal_ensemble_coeff is not None:
+        n_action_steps = cfg.chunk_size
+    else:
+        n_action_steps = cfg.n_action_steps or cfg.chunk_size
     return _LRConfig(
         n_obs_steps=1,
         horizon=cfg.chunk_size,
-        n_action_steps=cfg.chunk_size,
+        n_action_steps=n_action_steps,
         input_features=input_features,
         output_features={ACTION_KEY: PolicyFeature(type=FeatureType.ACTION, shape=(cfg.action_dim,))},
         normalization_mapping=norm_map,
@@ -216,6 +235,21 @@ class DiTFlow(nn.Module):
                 "camera and no state the DiT has only language to condition on.")
         if self.proprio.active:
             print(f"[DiT-Flow] {_describe_proprio(self.proprio)}")
+
+        # inference smoothing — temporal ensembling (ACT-style) or receding horizon.
+        # Ensembling re-predicts the full chunk every step and blends overlapping
+        # predictions; it operates in NORMALIZED action space (unnorm happens after).
+        if cfg.temporal_ensemble_coeff is not None:
+            self.ensembler = ACTTemporalEnsembler(cfg.temporal_ensemble_coeff, cfg.chunk_size)
+            print(f"[DiT-Flow] inference: temporal ensembling "
+                  f"(coeff={cfg.temporal_ensemble_coeff}, chunk={cfg.chunk_size}) — "
+                  f"one ODE sample per control step")
+        else:
+            self.ensembler = None
+            k = cfg.n_action_steps or cfg.chunk_size
+            mode = ("open-loop full chunk" if k == cfg.chunk_size
+                    else f"receding horizon (execute {k}/{cfg.chunk_size}, then re-plan)")
+            print(f"[DiT-Flow] inference: {mode}")
 
         # language tokenizer (same CLIP checkpoint as the text encoder)
         self.tokenizer = AutoTokenizer.from_pretrained(cfg.text_encoder_name)
@@ -325,20 +359,37 @@ class DiTFlow(nn.Module):
     def reset(self):
         """Call once before each episode during deployment."""
         self.policy.reset()
+        if self.ensembler is not None:
+            self.ensembler.reset()
 
     @torch.no_grad()
     def predict(self, obs_state, obs_image=None, task=None):
-        """One ODE integration step → (action_dim,) tensor in original units.
+        """Next action → (action_dim,) tensor in original units.
 
-        Uses select_action which internally manages an action queue: the first call
-        generates a full chunk (chunk_size actions via Euler ODE), subsequent calls
-        pop actions one by one until the queue is exhausted and a new chunk is generated.
-        Call reset() at the start of each episode to clear the queue.
+        With temporal ensembling (default): every call samples a FULL chunk_size chunk
+        via the ODE and blends it with previous overlapping predictions
+        (w = exp(-coeff*age)) — smooth, reactive, one ODE sample per control step.
+
+        Without it: select_action's queue pops pre-computed actions and re-plans every
+        n_action_steps (receding horizon) or chunk_size (open-loop) steps.
+
+        Call reset() at the start of each episode.
         """
-        action_norm = self.policy.select_action(
-            self._make_batch(obs_state, obs_image=obs_image, task=task,
-                             for_training=False, training=False)
-        )
+        if self.ensembler is not None:
+            # Bypass the action queue: training-style batch shapes (state (B,1,D),
+            # image (B,C,H,W)) → _prepare_batch stacks cameras → _generate_actions
+            # returns the full normalized chunk (B, chunk_size, action_dim).
+            self.policy.eval()
+            batch = self._make_batch(obs_state, obs_image=obs_image, task=task,
+                                     for_training=True, training=False)
+            batch = self.policy._prepare_batch(batch)
+            chunk = self.policy._generate_actions(batch)
+            action_norm = self.ensembler.update(chunk)
+        else:
+            action_norm = self.policy.select_action(
+                self._make_batch(obs_state, obs_image=obs_image, task=task,
+                                 for_training=False, training=False)
+            )
         return self._unnorm_action(action_norm)
 
 
@@ -354,6 +405,8 @@ def build_model(cfg: dict, stats: dict, device) -> DiTFlow:
         objective=m.get("objective", "flow_matching"),
         num_integration_steps=m.get("num_integration_steps", 10),
         integration_method=m.get("integration_method", "euler"),
+        temporal_ensemble_coeff=m.get("temporal_ensemble_coeff", 0.01),
+        n_action_steps=m.get("n_action_steps"),
         hidden_dim=m.get("hidden_dim", 512),
         num_layers=m.get("num_layers", 6),
         num_heads=m.get("num_heads", 8),

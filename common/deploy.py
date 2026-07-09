@@ -64,10 +64,19 @@ _IMG_TRANSFORM = transforms.Compose([
 
 # ── model ─────────────────────────────────────────────────────────────────────
 
-def load_policy(ckpt_path: str, device: torch.device):
+def load_policy(ckpt_path: str, device: torch.device, model_overrides: dict | None = None):
     ckpt     = torch.load(ckpt_path, map_location=device, weights_only=False)
     cfg_dict = ckpt["config"]
     policy   = ckpt.get("policy", "act")
+
+    # Inference-only overrides (e.g. --te-coeff / --n-action-steps): patch the
+    # checkpoint's baked-in model config before build_model. Only safe for knobs
+    # that don't change the network architecture / weights.
+    if model_overrides:
+        for k, v in model_overrides.items():
+            old = cfg_dict["model"].get(k, "<unset>")
+            cfg_dict["model"][k] = v
+            print(f"[deploy] OVERRIDE model.{k}: {old} -> {v}")
 
     policy_mod = _load_policy_module(policy)
     model = policy_mod.build_model(cfg_dict, ckpt["stats"], device)
@@ -155,7 +164,14 @@ def run(args):
                           "mps"  if torch.backends.mps.is_available() else "cpu")
     print(f"device: {device}")
 
-    model, cfg_dict, action_space, policy = load_policy(args.checkpoint, device)
+    overrides = {}
+    if args.te_coeff is not None:
+        overrides["temporal_ensemble_coeff"] = (
+            None if str(args.te_coeff).lower() in ("off", "none", "null")
+            else float(args.te_coeff))
+    if args.n_action_steps is not None:
+        overrides["n_action_steps"] = args.n_action_steps
+    model, cfg_dict, action_space, policy = load_policy(args.checkpoint, device, overrides)
     use_image = cfg_dict["dataset"]["use_image"] and not args.no_image
 
     # Record every predicted action over the rollout (shared schema with the offline
@@ -309,6 +325,14 @@ def main():
     parser.add_argument("--task", default="pick up the block and place it in the bin",
                         help="language instruction for language-conditioned policies "
                              "(dit_flow / pi0 / pi05 / pi0_fast); ignored by ACT / Diffusion")
+    parser.add_argument("--te-coeff", default=None,
+                        help="inference-only override: temporal-ensembling coeff for chunk "
+                             "policies (e.g. 0.01), or 'off' to disable. Works on existing "
+                             "checkpoints — no retraining (dit_flow; ACT reads its own config)")
+    parser.add_argument("--n-action-steps", type=int, default=None,
+                        help="inference-only override: receding horizon — execute the first "
+                             "k actions of each chunk then re-plan (used when ensembling is "
+                             "off; dit_flow)")
     run(parser.parse_args())
 
 

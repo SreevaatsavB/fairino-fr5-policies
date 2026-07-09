@@ -21,6 +21,14 @@ model:
   num_integration_steps: 10    # Euler ODE steps at inference; 10 balances speed/quality
   integration_method: "euler"  # "euler" | "rk4"
 
+  # inference smoothing (no effect on training/weights; overridable at deploy time via
+  # deploy.py --te-coeff / --n-action-steps, so existing checkpoints don't need retraining).
+  # Temporal ensembling re-predicts the chunk every step and blends overlapping predictions
+  # — same mechanism that makes ACT smooth on the FR5. Costs one ODE sample per 33 ms step
+  # (~5-10 ms on CUDA; too slow on CPU — use n_action_steps there instead).
+  temporal_ensemble_coeff: 0.01   # null to disable
+  n_action_steps: null            # only when ensembling off: execute first k of chunk_size, re-plan every k
+
   # DiT transformer
   hidden_dim: 512
   num_layers: 6

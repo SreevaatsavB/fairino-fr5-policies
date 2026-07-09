@@ -155,8 +155,14 @@ So `n_action_steps` controls the trade-off:
 - **smaller** → re-query more often → more reactive, but the heavy call fires more frequently
 
 Diffusion uses `n_action_steps=8` of a 16-step chunk (discards the back half — those far-future
-predictions are least reliable). DiT and π0 in this repo execute the **whole** chunk
-(`n_action_steps = chunk_size`) before re-querying.
+predictions are least reliable). π0 in this repo executes the **whole** chunk
+(`n_action_steps = chunk_size`) before re-querying. DiT (dit_flow) used to do the same — it was
+extremely jerky on the FR5 (hard cut between independently-sampled 32-step chunks) — and now
+defaults to **temporal ensembling** (`temporal_ensemble_coeff: 0.01`): a full chunk is re-predicted
+every step and overlapping predictions are blended, exactly like ACT. Set the coeff to `null` for
+the queue behaviour, with `n_action_steps < chunk_size` for receding horizon; both knobs are
+inference-only and can be overridden on an existing checkpoint via
+`deploy.py --te-coeff / --n-action-steps`.
 
 ---
 

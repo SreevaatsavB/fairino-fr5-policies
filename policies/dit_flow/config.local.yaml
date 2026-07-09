@@ -18,6 +18,8 @@ model:
   objective: "flow_matching"
   num_integration_steps: 10
   integration_method: "euler"
+  temporal_ensemble_coeff: 0.01   # null to disable (see config.yaml); laptop CPU can't sustain 30 Hz with it — fine for offline checks
+  n_action_steps: null
   hidden_dim: 256        # smaller than paper-scale for speed
   num_layers: 4
   num_heads: 8

@@ -18,6 +18,8 @@ model:
   objective: "flow_matching"
   num_integration_steps: 2    # minimal ODE steps for speed
   integration_method: "euler"
+  temporal_ensemble_coeff: 0.01   # exercises the ensembling predict() path
+  n_action_steps: null
   hidden_dim: 128
   num_layers: 2
   num_heads: 4
