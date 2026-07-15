@@ -27,6 +27,14 @@ model:
   # flow-matching inference
   num_inference_steps: 10
 
+  # memory / VRAM (see notebooks/train_pi0_runpod.ipynb for per-GPU guidance):
+  #   80 GB: full finetune as-is        48 GB: full w/ batch 2, or freeze_vision_encoder
+  #   24 GB: train_expert_only: true (freeze VLM, train 300M expert + projections)
+  dtype: "bfloat16"              # "float32" doubles VRAM; bf16 matches pi0's native training
+  gradient_checkpointing: true   # ~20% slower, large activation-memory saving
+  freeze_vision_encoder: false
+  train_expert_only: false
+
   # proprioception handling — benchmark axis (see docs/proprioception_modes.md)
   #   full | dropout | none   (override: python common/train.py --policy pi0 --proprio none)
   proprio_mode: full

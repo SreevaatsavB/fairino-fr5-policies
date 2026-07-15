@@ -82,6 +82,17 @@ class Pi0Config:
     action_expert_variant: str = "gemma_300m"
     tokenizer_max_length:  int = 48
 
+    # memory / VRAM knobs (threaded to lerobot's PI0Config; see notebooks/):
+    #   dtype                   "bfloat16" halves weights+activations vs "float32"
+    #   gradient_checkpointing  recompute activations in backward — big VRAM save, ~20% slower
+    #   freeze_vision_encoder   freeze SigLIP only
+    #   train_expert_only       freeze the whole VLM, train action expert + projections
+    #                           (the 24 GB-GPU option; also the least-overfitting one on 150 eps)
+    dtype:                  str  = "bfloat16"
+    gradient_checkpointing: bool = True
+    freeze_vision_encoder:  bool = False
+    train_expert_only:      bool = False
+
     # proprioception handling (see common/proprio.py): full | dropout | none
     proprio_mode:         str   = "full"
     proprio_dropout_rate: float = 0.3
@@ -114,6 +125,10 @@ def _lerobot_config(cfg: Pi0Config) -> _LRConfig:
         max_action_dim=cfg.max_action_dim,
         num_inference_steps=cfg.num_inference_steps,
         tokenizer_max_length=cfg.tokenizer_max_length,
+        dtype=cfg.dtype,
+        gradient_checkpointing=cfg.gradient_checkpointing,
+        freeze_vision_encoder=cfg.freeze_vision_encoder,
+        train_expert_only=cfg.train_expert_only,
     )
 
 
@@ -234,6 +249,10 @@ def build_model(cfg: dict, stats: dict, device) -> Pi0:
         paligemma_variant=m.get("paligemma_variant", "gemma_2b"),
         action_expert_variant=m.get("action_expert_variant", "gemma_300m"),
         tokenizer_max_length=m.get("tokenizer_max_length", 48),
+        dtype=m.get("dtype", "bfloat16"),
+        gradient_checkpointing=m.get("gradient_checkpointing", True),
+        freeze_vision_encoder=m.get("freeze_vision_encoder", False),
+        train_expert_only=m.get("train_expert_only", False),
         proprio_mode=m.get("proprio_mode", "full"),
         proprio_dropout_rate=m.get("proprio_dropout_rate", 0.3),
     )
