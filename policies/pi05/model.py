@@ -67,6 +67,12 @@ class Pi05Config:
     action_expert_variant: str = "gemma_300m"
     tokenizer_max_length:  int = 200    # longer than pi0's 48
 
+    # pretrained π0.5 weights (openpi port, ~6 GB from HF). CRITICAL: constructing
+    # PI05Policy(config) alone RANDOM-INITS the whole model — lerobot builds
+    # PaliGemma from config, it does not download weights. Finetuning requires
+    # loading this checkpoint; set to "" only for architecture smoke tests.
+    pretrained: str = "lerobot/pi05_base"
+
     # memory / VRAM knobs (threaded to lerobot's PI05Config; see notebooks/):
     #   dtype                   "bfloat16" halves weights+activations vs "float32"
     #   gradient_checkpointing  recompute activations in backward — big VRAM save, ~20% slower
@@ -120,8 +126,17 @@ def _lerobot_config(cfg: Pi05Config) -> _LRConfig:
 class Pi05(nn.Module):
     def __init__(self, cfg: Pi05Config, stats: dict):
         super().__init__()
-        self.cfg    = cfg
-        self.policy = PI05Policy(_lerobot_config(cfg))
+        self.cfg = cfg
+        if cfg.pretrained:
+            # loads the openpi-ported π0.5 weights, keeping OUR config (FR5 features).
+            # strict=False: normalization/stat buffers differ (we use IDENTITY norms).
+            self.policy = PI05Policy.from_pretrained(
+                cfg.pretrained, config=_lerobot_config(cfg), strict=False)
+            print(f"[pi05] loaded pretrained weights: {cfg.pretrained}")
+        else:
+            self.policy = PI05Policy(_lerobot_config(cfg))
+            print("[pi05] WARNING: pretrained='' — RANDOM-INIT weights (smoke tests only; "
+                  "finetuning a from-scratch VLA on this dataset will not work)")
 
         # proprioception mode (full | dropout | none) — applied in _make_batch.
         self.proprio = ProprioConfig(cfg.proprio_mode, cfg.proprio_dropout_rate)
@@ -209,6 +224,7 @@ def build_model(cfg: dict, stats: dict, device) -> Pi05:
         paligemma_variant=m.get("paligemma_variant", "gemma_2b"),
         action_expert_variant=m.get("action_expert_variant", "gemma_300m"),
         tokenizer_max_length=m.get("tokenizer_max_length", 200),
+        pretrained=m.get("pretrained", "lerobot/pi05_base") or "",
         dtype=m.get("dtype", "bfloat16"),
         gradient_checkpointing=m.get("gradient_checkpointing", True),
         freeze_vision_encoder=m.get("freeze_vision_encoder", False),

@@ -18,6 +18,12 @@ dataset:
 model:
   state_dim: 7
   action_dim: 7
+
+  # π0.5 pretrained weights — REQUIRED for finetuning. lerobot's PI05Policy(config)
+  # random-inits the whole model; only from_pretrained downloads weights.
+  # "lerobot/pi05_base" is the openpi port (~6 GB). Set null for smoke tests only.
+  pretrained: "lerobot/pi05_base"
+
   paligemma_variant: "gemma_2b"
   action_expert_variant: "gemma_300m"
   max_state_dim: 32

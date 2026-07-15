@@ -17,6 +17,11 @@ model:
   state_dim: 7
   action_dim: 7
 
+  # π0 pretrained weights — REQUIRED for finetuning. lerobot's PI0Policy(config)
+  # random-inits the whole 2.3B model; only from_pretrained downloads weights.
+  # "lerobot/pi0_base" is the openpi port (~6 GB). Set null for smoke tests only.
+  pretrained: "lerobot/pi0_base"
+
   # pi0 architecture (must match PaliGemma variant)
   paligemma_variant: "gemma_2b"
   action_expert_variant: "gemma_300m"
