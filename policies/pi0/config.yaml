@@ -22,6 +22,13 @@ model:
   # "lerobot/pi0_base" is the openpi port (~6 GB). Set null for smoke tests only.
   pretrained: "lerobot/pi0_base"
 
+  # finetuning recipe: LoRA adapters (peft) on the frozen VLM's q/k/v/o projections
+  # + FULL training of the 300M action expert & projections. rank 0 disables LoRA
+  # (then freeze_vision_encoder / train_expert_only below decide what trains).
+  vlm_lora_rank: 16
+  vlm_lora_alpha: 32
+  vlm_lora_dropout: 0.05
+
   # pi0 architecture (must match PaliGemma variant)
   paligemma_variant: "gemma_2b"
   action_expert_variant: "gemma_300m"

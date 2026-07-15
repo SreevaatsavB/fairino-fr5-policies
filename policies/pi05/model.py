@@ -31,11 +31,13 @@ from lerobot.configs.types import PolicyFeature, FeatureType, NormalizationMode
 # explicit path so the import works no matter how model.py gets loaded.
 try:
     from proprio import ProprioConfig, mask_state, describe as _describe_proprio
+    from vla_pretrained import _load_pretrained_weights, _inject_vlm_lora
 except ImportError:  # pragma: no cover
     import sys as _sys
     from pathlib import Path as _Path
     _sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "common"))
     from proprio import ProprioConfig, mask_state, describe as _describe_proprio
+    from vla_pretrained import _load_pretrained_weights, _inject_vlm_lora
 
 try:
     from transformers import AutoTokenizer
@@ -72,6 +74,13 @@ class Pi05Config:
     # PaliGemma from config, it does not download weights. Finetuning requires
     # loading this checkpoint; set to "" only for architecture smoke tests.
     pretrained: str = "lerobot/pi05_base"
+
+    # finetuning recipe — LoRA adapters on the VLM + FULL training of the action
+    # expert & projections (the base 2B VLM stays frozen). rank 0 disables LoRA,
+    # in which case freeze_vision_encoder / train_expert_only below apply instead.
+    vlm_lora_rank:    int   = 16
+    vlm_lora_alpha:   int   = 32
+    vlm_lora_dropout: float = 0.05
 
     # memory / VRAM knobs (threaded to lerobot's PI05Config; see notebooks/):
     #   dtype                   "bfloat16" halves weights+activations vs "float32"
@@ -119,7 +128,8 @@ def _lerobot_config(cfg: Pi05Config) -> _LRConfig:
         dtype=cfg.dtype,
         gradient_checkpointing=cfg.gradient_checkpointing,
         freeze_vision_encoder=cfg.freeze_vision_encoder,
-        train_expert_only=cfg.train_expert_only,
+        # with LoRA the base VLM must be frozen — adapters carry the VLM update
+        train_expert_only=cfg.train_expert_only or cfg.vlm_lora_rank > 0,
     )
 
 
@@ -127,16 +137,15 @@ class Pi05(nn.Module):
     def __init__(self, cfg: Pi05Config, stats: dict):
         super().__init__()
         self.cfg = cfg
+        self.policy = PI05Policy(_lerobot_config(cfg))
         if cfg.pretrained:
-            # loads the openpi-ported π0.5 weights, keeping OUR config (FR5 features).
-            # strict=False: normalization/stat buffers differ (we use IDENTITY norms).
-            self.policy = PI05Policy.from_pretrained(
-                cfg.pretrained, config=_lerobot_config(cfg), strict=False)
-            print(f"[pi05] loaded pretrained weights: {cfg.pretrained}")
+            _load_pretrained_weights(self.policy, cfg.pretrained, "pi05")
         else:
-            self.policy = PI05Policy(_lerobot_config(cfg))
             print("[pi05] WARNING: pretrained='' — RANDOM-INIT weights (smoke tests only; "
                   "finetuning a from-scratch VLA on this dataset will not work)")
+        if cfg.vlm_lora_rank > 0:
+            _inject_vlm_lora(self.policy, cfg.vlm_lora_rank, cfg.vlm_lora_alpha,
+                             cfg.vlm_lora_dropout, "pi05")
 
         # proprioception mode (full | dropout | none) — applied in _make_batch.
         self.proprio = ProprioConfig(cfg.proprio_mode, cfg.proprio_dropout_rate)
@@ -225,6 +234,9 @@ def build_model(cfg: dict, stats: dict, device) -> Pi05:
         action_expert_variant=m.get("action_expert_variant", "gemma_300m"),
         tokenizer_max_length=m.get("tokenizer_max_length", 200),
         pretrained=m.get("pretrained", "lerobot/pi05_base") or "",
+        vlm_lora_rank=m.get("vlm_lora_rank", 16),
+        vlm_lora_alpha=m.get("vlm_lora_alpha", 32),
+        vlm_lora_dropout=m.get("vlm_lora_dropout", 0.05),
         dtype=m.get("dtype", "bfloat16"),
         gradient_checkpointing=m.get("gradient_checkpointing", True),
         freeze_vision_encoder=m.get("freeze_vision_encoder", False),
