@@ -24,6 +24,17 @@ model:
   max_action_dim: 32
   tokenizer_max_length: 200
 
+  # π0-FAST pretrained weights — REQUIRED for finetuning. PI0FastPolicy(config)
+  # random-inits the whole model; only loading this checkpoint gives real weights.
+  # "lerobot/pi0fast_base" is the openpi port (gated). Set null for smoke tests only.
+  pretrained: "lerobot/pi0fast_base"
+
+  # memory / VRAM. pi0_fast is FULL-finetuned (no LoRA) — FAST extends PaliGemma's
+  # token vocabulary, so the action-token embeddings + LM head must train, which
+  # attention-only LoRA would freeze. bf16 + grad checkpointing keep it feasible.
+  dtype: "bfloat16"
+  gradient_checkpointing: true
+
   # proprioception handling — benchmark axis (see docs/proprioception_modes.md)
   #   full | dropout | none   (override: python common/train.py --policy pi0_fast --proprio none)
   proprio_mode: full

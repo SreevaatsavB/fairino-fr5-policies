@@ -38,11 +38,13 @@ from lerobot.configs.types import PolicyFeature, FeatureType, NormalizationMode
 # explicit path so the import works no matter how model.py gets loaded.
 try:
     from proprio import ProprioConfig, mask_state, describe as _describe_proprio
+    from vla_pretrained import _load_pretrained_weights
 except ImportError:  # pragma: no cover
     import sys as _sys
     from pathlib import Path as _Path
     _sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "common"))
     from proprio import ProprioConfig, mask_state, describe as _describe_proprio
+    from vla_pretrained import _load_pretrained_weights
 
 try:
     from transformers import AutoTokenizer
@@ -68,12 +70,24 @@ class Pi0FastConfig:
     chunk_size: int  = 50
     use_image:  bool = True
     max_state_dim:  int = 32
+    max_action_dim: int = 32
+    tokenizer_max_length: int = 200
+
+    # pretrained π0-FAST weights (openpi port, gated on HF). CRITICAL: constructing
+    # PI0FastPolicy(config) alone RANDOM-INITS the whole model — same trap as pi0/pi05.
+    # Finetuning requires loading this; set "" only for architecture smoke tests.
+    pretrained: str = "lerobot/pi0fast_base"
+
+    # memory / VRAM. NOTE: pi0_fast is FULL-finetuned (no LoRA here) — unlike pi0/pi05
+    # it has no separate action expert; FAST extends PaliGemma's token vocabulary, so
+    # the action-token embeddings + LM head must train, which attention-only LoRA would
+    # freeze. bf16 + gradient checkpointing keep the full finetune feasible.
+    dtype:                  str  = "bfloat16"
+    gradient_checkpointing: bool = True
 
     # proprioception handling (see common/proprio.py): full | dropout | none
     proprio_mode:         str   = "full"
     proprio_dropout_rate: float = 0.3
-    max_action_dim: int = 32
-    tokenizer_max_length: int = 200
 
 
 def _lerobot_config(cfg: Pi0FastConfig) -> _LRConfig:
@@ -100,6 +114,8 @@ def _lerobot_config(cfg: Pi0FastConfig) -> _LRConfig:
         max_state_dim=cfg.max_state_dim,
         max_action_dim=cfg.max_action_dim,
         tokenizer_max_length=cfg.tokenizer_max_length,
+        dtype=cfg.dtype,
+        gradient_checkpointing=cfg.gradient_checkpointing,
         use_kv_cache=True,
     )
 
@@ -109,6 +125,11 @@ class Pi0Fast(nn.Module):
         super().__init__()
         self.cfg    = cfg
         self.policy = PI0FastPolicy(_lerobot_config(cfg))
+        if cfg.pretrained:
+            _load_pretrained_weights(self.policy, cfg.pretrained, "pi0_fast")
+        else:
+            print("[pi0_fast] WARNING: pretrained='' — RANDOM-INIT weights (smoke tests "
+                  "only; finetuning a from-scratch VLA on this dataset will not work)")
 
         # proprioception mode (full | dropout | none) — applied in _make_batch.
         self.proprio = ProprioConfig(cfg.proprio_mode, cfg.proprio_dropout_rate)
@@ -194,6 +215,9 @@ def build_model(cfg: dict, stats: dict, device) -> Pi0Fast:
         max_state_dim=m.get("max_state_dim", 32),
         max_action_dim=m.get("max_action_dim", 32),
         tokenizer_max_length=m.get("tokenizer_max_length", 200),
+        pretrained=m.get("pretrained", "lerobot/pi0fast_base") or "",
+        dtype=m.get("dtype", "bfloat16"),
+        gradient_checkpointing=m.get("gradient_checkpointing", True),
         proprio_mode=m.get("proprio_mode", "full"),
         proprio_dropout_rate=m.get("proprio_dropout_rate", 0.3),
     )
