@@ -128,8 +128,8 @@ class Pi0Fast(nn.Module):
         if cfg.pretrained:
             _load_pretrained_weights(self.policy, cfg.pretrained, "pi0_fast")
         else:
-            print("[pi0_fast] WARNING: pretrained='' — RANDOM-INIT weights (smoke tests "
-                  "only; finetuning a from-scratch VLA on this dataset will not work)")
+            print("[pi0_fast] pretrained='' — RANDOM-INIT base (correct when a full checkpoint "
+                  "is loaded next, e.g. deploy; for training set pretrained=lerobot/pi0fast_base)")
 
         # proprioception mode (full | dropout | none) — applied in _make_batch.
         self.proprio = ProprioConfig(cfg.proprio_mode, cfg.proprio_dropout_rate)

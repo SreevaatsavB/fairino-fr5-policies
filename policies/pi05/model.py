@@ -141,8 +141,8 @@ class Pi05(nn.Module):
         if cfg.pretrained:
             _load_pretrained_weights(self.policy, cfg.pretrained, "pi05")
         else:
-            print("[pi05] WARNING: pretrained='' — RANDOM-INIT weights (smoke tests only; "
-                  "finetuning a from-scratch VLA on this dataset will not work)")
+            print("[pi05] pretrained='' — RANDOM-INIT base (correct when a full checkpoint is "
+                  "loaded next, e.g. deploy; for training set pretrained=lerobot/pi05_base)")
         if cfg.vlm_lora_rank > 0:
             _inject_vlm_lora(self.policy, cfg.vlm_lora_rank, cfg.vlm_lora_alpha,
                              cfg.vlm_lora_dropout, "pi05")

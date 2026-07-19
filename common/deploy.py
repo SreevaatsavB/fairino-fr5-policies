@@ -78,6 +78,15 @@ def load_policy(ckpt_path: str, device: torch.device, model_overrides: dict | No
             cfg_dict["model"][k] = v
             print(f"[deploy] OVERRIDE model.{k}: {old} -> {v}")
 
+    # The checkpoint's model_state already holds every weight (base VLM + LoRA +
+    # action expert + norm buffers). For the VLA policies whose config carries a
+    # `pretrained` repo id (pi0/pi05/pi0_fast), null it so build_model does NOT
+    # re-download the ~6 GB gated base just to overwrite it a line later.
+    if cfg_dict["model"].get("pretrained"):
+        print(f"[deploy] skip pretrained download ({cfg_dict['model']['pretrained']}) "
+              f"— weights load from the checkpoint")
+        cfg_dict["model"]["pretrained"] = ""
+
     policy_mod = _load_policy_module(policy)
     model = policy_mod.build_model(cfg_dict, ckpt["stats"], device)
     model.load_state_dict(ckpt["model_state"])
