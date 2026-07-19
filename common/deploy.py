@@ -79,10 +79,9 @@ def load_policy(ckpt_path: str, device: torch.device, model_overrides: dict | No
             print(f"[deploy] OVERRIDE model.{k}: {old} -> {v}")
 
     # For the VLA policies (pi0/pi05/pi0_fast), skip re-downloading the gated ~6 GB
-    # base — the checkpoint's model_state carries every weight. Honours an explicit
-    # `pretrained` override if the caller passed one.
+    # base — the checkpoint's model_state carries every weight.
     from vla_pretrained import strip_pretrained_for_checkpoint  # noqa: E402
-    strip_pretrained_for_checkpoint(cfg_dict, model_overrides)
+    strip_pretrained_for_checkpoint(cfg_dict)
 
     policy_mod = _load_policy_module(policy)
     model = policy_mod.build_model(cfg_dict, ckpt["stats"], device)

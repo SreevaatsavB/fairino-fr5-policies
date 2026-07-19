@@ -67,36 +67,47 @@ def _inject_vlm_lora(policy, rank: int, alpha: int, dropout: float, tag: str):
           f"total trainable {n_train/1e6:.0f}M (frozen base VLM + full action expert)")
 
 
+# per-policy base checkpoint — used only to make the random-init warning concrete.
+_BASE_HINT = {
+    "pi0":      "lerobot/pi0_base",
+    "pi05":     "lerobot/pi05_base",
+    "pi0_fast": "lerobot/pi0fast_base",
+}
+
+
 def warn_or_load_pretrained(policy, cfg, tag: str):
     """Wrapper entry point: load the pretrained base, or LOUDLY flag random init.
 
     An empty cfg.pretrained is only correct when a full checkpoint is loaded right
     after build_model (deploy / eval / probe — see strip_pretrained_for_checkpoint).
     For a TRAINING run it means the VLA starts from random weights and learns
-    nothing, so the message is loud enough to catch that case. Single source of
-    truth so the three wrappers can't drift."""
+    nothing, so the message is loud AND names the exact base repo to set. Single
+    source of truth so the three wrappers can't drift."""
     if cfg.pretrained:
         _load_pretrained_weights(policy, cfg.pretrained, tag)
     else:
+        base = _BASE_HINT.get(tag, "the base checkpoint")
         print(f"[{tag}] pretrained='' — RANDOM-INIT base. Expected ONLY when a full "
               f"checkpoint is loaded right after (deploy / eval / probe). If you are "
-              f"TRAINING, set model.pretrained to a base checkpoint or the run learns "
-              f"nothing.")
+              f"TRAINING, set model.pretrained={base} or the run learns nothing.")
 
 
-def strip_pretrained_for_checkpoint(cfg_dict: dict, model_overrides: dict | None = None):
-    """For checkpoint loaders (deploy / eval / probe): null model.pretrained before
-    build_model so it does NOT re-download the gated ~6 GB base only to overwrite it —
-    the checkpoint's model_state carries every weight (base VLM + LoRA + expert +
-    buffers). Mutates and returns cfg_dict.
+def strip_pretrained_for_checkpoint(cfg_dict: dict):
+    """For checkpoint loaders (deploy / eval / probe): force model.pretrained empty
+    before build_model so it never re-downloads the gated ~6 GB base — the
+    checkpoint's model_state carries every weight (base VLM + LoRA + expert +
+    buffers), which load_state_dict restores immediately after. Mutates cfg_dict.
 
-    Respects an explicit `pretrained` in model_overrides: if the caller deliberately
-    asked to (re)build from a hub base, that wins and nothing is stripped."""
-    m = cfg_dict.get("model", {})
-    if "pretrained" in (model_overrides or {}):
-        return cfg_dict                      # caller explicitly chose a base — honour it
-    if m.get("pretrained"):
-        print(f"[checkpoint] skip pretrained download ({m['pretrained']}) — "
-              f"weights load from the checkpoint")
-        m["pretrained"] = ""
+    Set UNCONDITIONALLY on purpose: every VLA build_model falls back to its default
+    base id when the key is absent (m.get("pretrained", "lerobot/..") or ""), so a
+    checkpoint whose saved config omitted the key would still resurrect the download
+    if we only nulled a present-and-truthy value. Forcing "" also covers the case of
+    an explicit `pretrained` override, which would be pointless here anyway since
+    load_state_dict overwrites the base a line later. No-op for non-VLA policies,
+    whose build_model never reads model.pretrained."""
+    m = cfg_dict.setdefault("model", {})
+    prev = m.get("pretrained")
+    m["pretrained"] = ""
+    if prev:
+        print(f"[checkpoint] skip pretrained download ({prev}) — weights load from the checkpoint")
     return cfg_dict
