@@ -31,13 +31,13 @@ from lerobot.configs.types import PolicyFeature, FeatureType, NormalizationMode
 # explicit path so the import works no matter how model.py gets loaded.
 try:
     from proprio import ProprioConfig, mask_state, describe as _describe_proprio
-    from vla_pretrained import _load_pretrained_weights, _inject_vlm_lora
+    from vla_pretrained import _inject_vlm_lora, warn_or_load_pretrained
 except ImportError:  # pragma: no cover
     import sys as _sys
     from pathlib import Path as _Path
     _sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "common"))
     from proprio import ProprioConfig, mask_state, describe as _describe_proprio
-    from vla_pretrained import _load_pretrained_weights, _inject_vlm_lora
+    from vla_pretrained import _inject_vlm_lora, warn_or_load_pretrained
 
 try:
     from transformers import AutoTokenizer
@@ -138,11 +138,7 @@ class Pi05(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.policy = PI05Policy(_lerobot_config(cfg))
-        if cfg.pretrained:
-            _load_pretrained_weights(self.policy, cfg.pretrained, "pi05")
-        else:
-            print("[pi05] pretrained='' — RANDOM-INIT base (correct when a full checkpoint is "
-                  "loaded next, e.g. deploy; for training set pretrained=lerobot/pi05_base)")
+        warn_or_load_pretrained(self.policy, cfg, "pi05")
         if cfg.vlm_lora_rank > 0:
             _inject_vlm_lora(self.policy, cfg.vlm_lora_rank, cfg.vlm_lora_alpha,
                              cfg.vlm_lora_dropout, "pi05")

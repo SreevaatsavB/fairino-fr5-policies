@@ -65,3 +65,38 @@ def _inject_vlm_lora(policy, rank: int, alpha: int, dropout: float, tag: str):
     n_train = sum(p.numel() for p in policy.parameters() if p.requires_grad)
     print(f"[{tag}] LoRA r={rank} on VLM q/k/v/o: {n_lora/1e6:.1f}M adapter params; "
           f"total trainable {n_train/1e6:.0f}M (frozen base VLM + full action expert)")
+
+
+def warn_or_load_pretrained(policy, cfg, tag: str):
+    """Wrapper entry point: load the pretrained base, or LOUDLY flag random init.
+
+    An empty cfg.pretrained is only correct when a full checkpoint is loaded right
+    after build_model (deploy / eval / probe — see strip_pretrained_for_checkpoint).
+    For a TRAINING run it means the VLA starts from random weights and learns
+    nothing, so the message is loud enough to catch that case. Single source of
+    truth so the three wrappers can't drift."""
+    if cfg.pretrained:
+        _load_pretrained_weights(policy, cfg.pretrained, tag)
+    else:
+        print(f"[{tag}] pretrained='' — RANDOM-INIT base. Expected ONLY when a full "
+              f"checkpoint is loaded right after (deploy / eval / probe). If you are "
+              f"TRAINING, set model.pretrained to a base checkpoint or the run learns "
+              f"nothing.")
+
+
+def strip_pretrained_for_checkpoint(cfg_dict: dict, model_overrides: dict | None = None):
+    """For checkpoint loaders (deploy / eval / probe): null model.pretrained before
+    build_model so it does NOT re-download the gated ~6 GB base only to overwrite it —
+    the checkpoint's model_state carries every weight (base VLM + LoRA + expert +
+    buffers). Mutates and returns cfg_dict.
+
+    Respects an explicit `pretrained` in model_overrides: if the caller deliberately
+    asked to (re)build from a hub base, that wins and nothing is stripped."""
+    m = cfg_dict.get("model", {})
+    if "pretrained" in (model_overrides or {}):
+        return cfg_dict                      # caller explicitly chose a base — honour it
+    if m.get("pretrained"):
+        print(f"[checkpoint] skip pretrained download ({m['pretrained']}) — "
+              f"weights load from the checkpoint")
+        m["pretrained"] = ""
+    return cfg_dict

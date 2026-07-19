@@ -58,6 +58,8 @@ def _load_policy_module(policy):
 def probe(ckpt_path, n_batches, device):
     ck = torch.load(ckpt_path, map_location=device, weights_only=False)
     cfg = ck["config"]
+    from vla_pretrained import strip_pretrained_for_checkpoint
+    strip_pretrained_for_checkpoint(cfg)   # skip 6 GB base re-download (VLA policies)
     model = _load_policy_module(ck.get("policy", "act")).build_model(cfg, ck["stats"], device)
     model.load_state_dict(ck["model_state"])
     model.eval()

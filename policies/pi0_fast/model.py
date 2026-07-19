@@ -38,13 +38,13 @@ from lerobot.configs.types import PolicyFeature, FeatureType, NormalizationMode
 # explicit path so the import works no matter how model.py gets loaded.
 try:
     from proprio import ProprioConfig, mask_state, describe as _describe_proprio
-    from vla_pretrained import _load_pretrained_weights
+    from vla_pretrained import warn_or_load_pretrained
 except ImportError:  # pragma: no cover
     import sys as _sys
     from pathlib import Path as _Path
     _sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "common"))
     from proprio import ProprioConfig, mask_state, describe as _describe_proprio
-    from vla_pretrained import _load_pretrained_weights
+    from vla_pretrained import warn_or_load_pretrained
 
 try:
     from transformers import AutoTokenizer
@@ -125,11 +125,7 @@ class Pi0Fast(nn.Module):
         super().__init__()
         self.cfg    = cfg
         self.policy = PI0FastPolicy(_lerobot_config(cfg))
-        if cfg.pretrained:
-            _load_pretrained_weights(self.policy, cfg.pretrained, "pi0_fast")
-        else:
-            print("[pi0_fast] pretrained='' — RANDOM-INIT base (correct when a full checkpoint "
-                  "is loaded next, e.g. deploy; for training set pretrained=lerobot/pi0fast_base)")
+        warn_or_load_pretrained(self.policy, cfg, "pi0_fast")
 
         # proprioception mode (full | dropout | none) — applied in _make_batch.
         self.proprio = ProprioConfig(cfg.proprio_mode, cfg.proprio_dropout_rate)
