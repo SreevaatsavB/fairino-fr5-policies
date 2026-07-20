@@ -9,6 +9,7 @@ dataset:
   root: "../so101-fr5-teleop/lerobot_dataset"   # relative to repo root
   chunk_size: 32          # horizon = n_action_steps (full chunk executed per query)
   use_image: true
+  camera_names: [wrist_cam, scene_cam]
   image_size: [224, 224]
   val_frac: 0.1
 

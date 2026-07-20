@@ -78,12 +78,20 @@ _CLIP_MEAN = torch.tensor([0.48145466, 0.4578275,  0.40821073]).view(3, 1, 1)
 _CLIP_STD  = torch.tensor([0.26862954, 0.26130258, 0.27577711]).view(3, 1, 1)
 
 
+def _image_keys(camera_names) -> list:
+    """('wrist_cam','scene_cam') -> ['observation.images.wrist_cam', ...]. lerobot's
+    MultiTaskDiT stacks these image_features and encodes each with the (shared) vision
+    encoder — the DINO adapter is batch-agnostic, so multi-camera works per-camera."""
+    return [f"observation.images.{c}" for c in camera_names]
+
+
 @dataclass
 class DiTFlowConfig:
     state_dim:  int  = 7
     action_dim: int  = 7
     chunk_size: int  = 32         # horizon == n_action_steps
     use_image:  bool = True
+    camera_names: tuple = ("wrist_cam", "scene_cam")  # wrist + scene
 
     # flow-matching / diffusion
     objective:             str   = "flow_matching"   # "flow_matching" | "diffusion"
@@ -136,7 +144,8 @@ def _lerobot_config(cfg: DiTFlowConfig) -> _LRConfig:
         "ACTION": NormalizationMode.IDENTITY,
     }
     if cfg.use_image:
-        input_features[IMAGE_KEY] = PolicyFeature(type=FeatureType.VISUAL, shape=(3, 224, 224))
+        for key in _image_keys(cfg.camera_names):
+            input_features[key] = PolicyFeature(type=FeatureType.VISUAL, shape=(3, 224, 224))
         norm_map["VISUAL"] = NormalizationMode.IDENTITY
 
     # With temporal ensembling the wrapper re-predicts every step and needs the FULL
@@ -208,6 +217,7 @@ class DiTFlow(nn.Module):
     def __init__(self, cfg: DiTFlowConfig, stats: dict):
         super().__init__()
         self.cfg = cfg
+        self.image_keys = _image_keys(cfg.camera_names)
         self.policy = MultiTaskDiTPolicy(_lerobot_config(cfg))
 
         # optional: replace the stock CLIP vision tower with a FROZEN self-supervised
@@ -328,10 +338,15 @@ class DiTFlow(nn.Module):
         batch = {STATE_KEY: state}
 
         if self.cfg.use_image and obs_image is not None:
-            # Always (B, C, H, W); _prepare_batch and/or the queue adds n_obs_steps.
-            # dataset.py emits ImageNet-normed images: the DINO/I-JEPA backbones expect
-            # exactly that (pass through), the stock CLIP tower expects CLIP stats.
-            batch[IMAGE_KEY] = obs_image if self.uses_dino else self._renorm_image(obs_image)
+            # 1 camera -> tensor; multi-cam -> {key: tensor}. dataset.py emits
+            # ImageNet-normed images: DINO/I-JEPA want that as-is; the CLIP tower
+            # needs CLIP stats. _prepare_batch stacks image_features into OBS_IMAGES.
+            if torch.is_tensor(obs_image):
+                obs_image = {self.image_keys[0]: obs_image}
+            for key in self.image_keys:
+                if key not in obs_image:
+                    raise ValueError(f"missing camera {key!r}; got {list(obs_image)}")
+                batch[key] = obs_image[key] if self.uses_dino else self._renorm_image(obs_image[key])
 
         # Language tokens — always include so conditioning_dim stays constant.
         # Default to empty strings; CLIP text encoder handles them gracefully.
@@ -402,6 +417,7 @@ def build_model(cfg: dict, stats: dict, device) -> DiTFlow:
         action_dim=m["action_dim"],
         chunk_size=d["chunk_size"],
         use_image=d["use_image"],
+        camera_names=tuple(d.get("camera_names", ("wrist_cam", "scene_cam"))),  # dataset-level (matches ACT)
         objective=m.get("objective", "flow_matching"),
         num_integration_steps=m.get("num_integration_steps", 10),
         integration_method=m.get("integration_method", "euler"),

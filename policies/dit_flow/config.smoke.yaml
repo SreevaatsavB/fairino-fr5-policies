@@ -9,6 +9,7 @@ dataset:
   root: "_smoke_dataset"
   chunk_size: 20
   use_image: true
+  camera_names: [wrist_cam]
   image_size: [224, 224]
   val_frac: 0.5
 

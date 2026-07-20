@@ -8,6 +8,7 @@ dataset:
   root: "lerobot_dataset"
   chunk_size: 32
   use_image: true
+  camera_names: [wrist_cam]
   image_size: [224, 224]
   val_frac: 0.1
   aug_level: "crops"    # keep crops-only; heavier aug (background replacement) untested with the ViT encoders

@@ -62,6 +62,12 @@ _IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
 _IMAGENET_STD  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
 _TEXT_TOKENIZER = "google/paligemma-3b-pt-224"   # text side (gated)
 
+def _image_keys(camera_names) -> list:
+    """('wrist_cam','scene_cam') -> ['observation.images.wrist_cam', 'observation.images.scene_cam'].
+    lerobot's PI0/PI05/PI0Fast encode each camera with the SHARED SigLIP and prepend its
+    tokens — no extra params, so multi-camera is pretrained-weight-compatible."""
+    return [f"observation.images.{c}" for c in camera_names]
+
 
 @dataclass
 class Pi0FastConfig:
@@ -72,6 +78,7 @@ class Pi0FastConfig:
     max_state_dim:  int = 32
     max_action_dim: int = 32
     tokenizer_max_length: int = 200
+    camera_names: tuple = ("wrist_cam", "scene_cam")  # wrist + scene, shared SigLIP
 
     # pretrained π0-FAST weights (openpi port, gated on HF). CRITICAL: constructing
     # PI0FastPolicy(config) alone RANDOM-INITS the whole model — same trap as pi0/pi05.
@@ -99,8 +106,8 @@ def _lerobot_config(cfg: Pi0FastConfig) -> _LRConfig:
         "ACTION": NormalizationMode.IDENTITY,
     }
     if cfg.use_image:
-        input_features[IMAGE_KEY] = PolicyFeature(type=FeatureType.VISUAL,
-                                                   shape=(3, 224, 224))
+        for key in _image_keys(cfg.camera_names):
+            input_features[key] = PolicyFeature(type=FeatureType.VISUAL, shape=(3, 224, 224))
         norm_map["VISUAL"] = NormalizationMode.IDENTITY
 
     return _LRConfig(
@@ -176,7 +183,12 @@ class Pi0Fast(nn.Module):
         task = task or [""] * B
         batch = {STATE_KEY: mask_state(self._norm_state(obs_state), self.proprio, training)}
         if self.cfg.use_image and obs_image is not None:
-            batch[IMAGE_KEY] = self._to_raw(obs_image)
+            if torch.is_tensor(obs_image):                 # 1 camera -> wrap as dict
+                obs_image = {self.image_keys[0]: obs_image}
+            for key in self.image_keys:                    # multi-cam: feed each camera
+                if key not in obs_image:
+                    raise ValueError(f"missing camera {key!r}; got {list(obs_image)}")
+                batch[key] = self._to_raw(obs_image[key])
         ids, mask = self._tokenize(task, dev)
         batch[LANG_TOKENS]    = ids
         batch[LANG_ATTN_MASK] = mask
@@ -211,6 +223,7 @@ def build_model(cfg: dict, stats: dict, device) -> Pi0Fast:
         max_state_dim=m.get("max_state_dim", 32),
         max_action_dim=m.get("max_action_dim", 32),
         tokenizer_max_length=m.get("tokenizer_max_length", 200),
+        camera_names=tuple(d.get("camera_names", ("wrist_cam", "scene_cam"))),  # dataset-level (matches ACT)
         pretrained=m.get("pretrained", "lerobot/pi0fast_base") or "",
         dtype=m.get("dtype", "bfloat16"),
         gradient_checkpointing=m.get("gradient_checkpointing", True),

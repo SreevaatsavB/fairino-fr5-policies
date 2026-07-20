@@ -67,6 +67,13 @@ _IMAGENET_STD  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
 _PALIGEMMA_TOKENIZER = "google/paligemma-3b-pt-224"
 
 
+def _image_keys(camera_names) -> list:
+    """('wrist_cam','scene_cam') -> ['observation.images.wrist_cam', 'observation.images.scene_cam'].
+    lerobot's PI0 encodes each camera with the SHARED SigLIP and prepends its tokens —
+    no extra params, so multi-camera is pretrained-weight-compatible (same 778 tensors)."""
+    return [f"observation.images.{c}" for c in camera_names]
+
+
 @dataclass
 class Pi0Config:
     state_dim:  int  = 7
@@ -83,6 +90,9 @@ class Pi0Config:
     paligemma_variant:    str = "gemma_2b"
     action_expert_variant: str = "gemma_300m"
     tokenizer_max_length:  int = 48
+
+    # cameras fed to the VLM (each encoded by the shared SigLIP). FR5 has wrist + scene.
+    camera_names: tuple = ("wrist_cam", "scene_cam")
 
     # pretrained π0 weights (openpi port, ~6 GB from HF). CRITICAL: constructing
     # PI0Policy(config) alone RANDOM-INITS the whole 2.3B model — lerobot builds
@@ -122,8 +132,8 @@ def _lerobot_config(cfg: Pi0Config) -> _LRConfig:
         "ACTION": NormalizationMode.IDENTITY,
     }
     if cfg.use_image:
-        input_features[IMAGE_KEY] = PolicyFeature(type=FeatureType.VISUAL,
-                                                   shape=(3, 224, 224))
+        for key in _image_keys(cfg.camera_names):
+            input_features[key] = PolicyFeature(type=FeatureType.VISUAL, shape=(3, 224, 224))
         norm_map["VISUAL"] = NormalizationMode.IDENTITY
 
     return _LRConfig(
@@ -152,6 +162,7 @@ class Pi0(nn.Module):
     def __init__(self, cfg: Pi0Config, stats: dict):
         super().__init__()
         self.cfg = cfg
+        self.image_keys = _image_keys(cfg.camera_names)
         self.policy = PI0Policy(_lerobot_config(cfg))
         warn_or_load_pretrained(self.policy, cfg, "pi0")
         if cfg.vlm_lora_rank > 0:
@@ -226,7 +237,14 @@ class Pi0(nn.Module):
         batch = {STATE_KEY: state}                         # (B, state_dim), full/dropout/none
 
         if self.cfg.use_image and obs_image is not None:
-            batch[IMAGE_KEY] = self._to_raw(obs_image)     # (B, C, H, W) in [0,1]
+            # accept a single (B,C,H,W) tensor (1 camera) or a {key: tensor} dict
+            # (multi-cam; train.py/deploy pass the dict when camera_names has >1)
+            if torch.is_tensor(obs_image):
+                obs_image = {self.image_keys[0]: obs_image}
+            for key in self.image_keys:
+                if key not in obs_image:
+                    raise ValueError(f"missing camera {key!r}; got {list(obs_image)}")
+                batch[key] = self._to_raw(obs_image[key])  # (B, C, H, W) in [0,1]
 
         ids, mask = self._tokenize(task, dev)
         batch[LANG_TOKENS]    = ids
@@ -269,6 +287,7 @@ def build_model(cfg: dict, stats: dict, device) -> Pi0:
         paligemma_variant=m.get("paligemma_variant", "gemma_2b"),
         action_expert_variant=m.get("action_expert_variant", "gemma_300m"),
         tokenizer_max_length=m.get("tokenizer_max_length", 48),
+        camera_names=tuple(d.get("camera_names", ("wrist_cam", "scene_cam"))),  # dataset-level (matches ACT)
         pretrained=m.get("pretrained", "lerobot/pi0_base") or "",
         vlm_lora_rank=m.get("vlm_lora_rank", 16),
         vlm_lora_alpha=m.get("vlm_lora_alpha", 32),

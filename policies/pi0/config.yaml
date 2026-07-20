@@ -9,6 +9,7 @@ dataset:
   root: "../so101-fr5-teleop/lerobot_dataset"
   chunk_size: 50          # pi0 default (1.67 s at 30 Hz)
   use_image: true
+  camera_names: [wrist_cam, scene_cam]   # wrist + scene
   image_size: [224, 224]
   val_frac: 0.1
   aug_level: "crops"      # crops only — pi0 uses SigLIP norm internally
