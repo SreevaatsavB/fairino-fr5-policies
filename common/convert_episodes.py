@@ -37,6 +37,7 @@ Usage:
 import argparse
 import json
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import os
@@ -237,6 +238,7 @@ def convert(episodes_dir: Path, out_dir: Path, extract_frames: bool,
     all_rows: list[dict] = []
     ep_records: list[dict] = []
     tasks: dict[str, int] = {}
+    extract_jobs: list[tuple] = []   # (video, n, out_dir, stride) — run in parallel below
     cursor = 0  # running absolute row index across episodes
 
     for ep_idx, ep_dir in enumerate(ep_dirs):
@@ -259,8 +261,8 @@ def convert(episodes_dir: Path, out_dir: Path, extract_frames: bool,
                 "task_index": task_index,
             })
 
-        # copy each camera's video so dataset.py can read frames, and pre-extract
-        # aligned JPEGs (one per resampled training frame) for fast training I/O.
+        # copy each camera's video so dataset.py can read frames, and QUEUE the
+        # frame extraction (all jobs run in parallel after the loop — see below).
         for cam_key in cameras:
             src_name, _ = CAMERAS[cam_key]
             src_video = ep_dir / src_name
@@ -268,11 +270,9 @@ def convert(episodes_dir: Path, out_dir: Path, extract_frames: bool,
             if src_video.exists():
                 shutil.copyfile(src_video, dst_video)
                 if extract_frames:
-                    got = _extract_frames(dst_video, n,
-                                          frames_roots[cam_key] / f"ep-{ep_idx:03d}",
-                                          stride=extract_stride)
-                    print(f"  {ep_dir.name} [{cam_key.split('.')[-1]}]: extracted {got} "
-                          f"(stride {extract_stride}) of {n} frames")
+                    extract_jobs.append((dst_video, n,
+                                         frames_roots[cam_key] / f"ep-{ep_idx:03d}",
+                                         extract_stride))
             else:
                 print(f"  [warn] {ep_dir.name}: no {src_name}")
 
@@ -290,6 +290,26 @@ def convert(episodes_dir: Path, out_dir: Path, extract_frames: bool,
 
     if not all_rows:
         raise SystemExit("no frames produced — nothing written")
+
+    # ---- parallel frame extraction (the slow part) ----
+    # OpenCV releases the GIL during decode/encode, so a thread pool genuinely
+    # runs on all cores. Full quality (identical cv2.imwrite), just parallel.
+    if extract_frames and extract_jobs:
+        workers = min(len(extract_jobs), max(4, (os.cpu_count() or 4)))
+        n_jobs = len(extract_jobs)
+        print(f"extracting frames from {n_jobs} videos with {workers} threads "
+              f"(full quality, parallel)...")
+        done = 0
+        def _job(a):
+            video, n_fr, out_dir, stride = a
+            return _extract_frames(video, n_fr, out_dir, stride)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            total_extracted = 0
+            for got in ex.map(_job, extract_jobs):
+                total_extracted += got
+                done += 1
+                if done % 25 == 0 or done == n_jobs:
+                    print(f"    {done}/{n_jobs} videos  ({total_extracted} frames)", flush=True)
 
     total_frames = cursor
     total_episodes = len(ep_records)
