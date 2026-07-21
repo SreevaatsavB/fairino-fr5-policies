@@ -38,13 +38,15 @@ from lerobot.configs.types import PolicyFeature, FeatureType, NormalizationMode
 # explicit path so the import works no matter how model.py gets loaded.
 try:
     from proprio import ProprioConfig, mask_state, describe as _describe_proprio
-    from vla_pretrained import warn_or_load_pretrained
+    from vla_pretrained import (warn_or_load_pretrained, _inject_vlm_lora,
+                                build_context, quantize_vlm)
 except ImportError:  # pragma: no cover
     import sys as _sys
     from pathlib import Path as _Path
     _sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "common"))
     from proprio import ProprioConfig, mask_state, describe as _describe_proprio
-    from vla_pretrained import warn_or_load_pretrained
+    from vla_pretrained import (warn_or_load_pretrained, _inject_vlm_lora,
+                                build_context, quantize_vlm)
 
 try:
     from transformers import AutoTokenizer
@@ -92,6 +94,16 @@ class Pi0FastConfig:
     dtype:                  str  = "bfloat16"
     gradient_checkpointing: bool = True
 
+    # k-bit quantization of the FROZEN VLM: "none" | "nf4" | "int8". Defaults OFF
+    # because the full finetune above is pi0_fast's native recipe. Turning it on
+    # necessarily converts the run to QLoRA — a 4-bit base takes no gradient — so
+    # it REQUIRES vlm_lora_rank > 0. lm_head and the token embeddings are left
+    # unquantized either way, so the FAST action tokens can still be learned.
+    quantize:         str   = "none"
+    vlm_lora_rank:    int   = 0        # >0 -> LoRA on the VLM q/k/v/o (needed for quantize)
+    vlm_lora_alpha:   int   = 32
+    vlm_lora_dropout: float = 0.05
+
     # proprioception handling (see common/proprio.py): full | dropout | none
     proprio_mode:         str   = "full"
     proprio_dropout_rate: float = 0.3
@@ -128,11 +140,29 @@ def _lerobot_config(cfg: Pi0FastConfig) -> _LRConfig:
 
 
 class Pi0Fast(nn.Module):
-    def __init__(self, cfg: Pi0FastConfig, stats: dict):
+    def __init__(self, cfg: Pi0FastConfig, stats: dict, device=None):
         super().__init__()
         self.cfg    = cfg
-        self.policy = PI0FastPolicy(_lerobot_config(cfg))
+        # Build order matters — see the module docstring of common/vla_pretrained.py.
+        # build_context puts the params straight into VRAM instead of materialising
+        # them in host RAM first (which OOM-kills a memory-capped container before
+        # the GPU is ever touched).
+        with build_context(device):
+            self.policy = PI0FastPolicy(_lerobot_config(cfg))
         warn_or_load_pretrained(self.policy, cfg, "pi0_fast")
+        quantize_vlm(self.policy, cfg.quantize, "pi0_fast", lora_rank=cfg.vlm_lora_rank)
+        if cfg.vlm_lora_rank > 0:
+            # pi0/pi05 freeze the base VLM via lerobot's train_expert_only, but
+            # PI0FastConfig has no such flag — without freezing here the adapters
+            # would train alongside a fully-unfrozen 3B backbone, which is not LoRA
+            # in any meaningful sense (and blows up optimizer state). lm_head and
+            # the token embeddings stay trainable on purpose: FAST extends the
+            # vocabulary with action tokens that the model must still learn.
+            for n, p in self.policy.model.paligemma_with_expert.paligemma.named_parameters():
+                if "lm_head" not in n and "embed_tokens" not in n:
+                    p.requires_grad_(False)
+            _inject_vlm_lora(self.policy, cfg.vlm_lora_rank, cfg.vlm_lora_alpha,
+                             cfg.vlm_lora_dropout, "pi0_fast")
 
         # proprioception mode (full | dropout | none) — applied in _make_batch.
         self.proprio = ProprioConfig(cfg.proprio_mode, cfg.proprio_dropout_rate)
@@ -227,7 +257,13 @@ def build_model(cfg: dict, stats: dict, device) -> Pi0Fast:
         pretrained=m.get("pretrained", "lerobot/pi0fast_base") or "",
         dtype=m.get("dtype", "bfloat16"),
         gradient_checkpointing=m.get("gradient_checkpointing", True),
+        quantize=m.get("quantize", "none") or "none",
+        vlm_lora_rank=m.get("vlm_lora_rank", 0),
+        vlm_lora_alpha=m.get("vlm_lora_alpha", 32),
+        vlm_lora_dropout=m.get("vlm_lora_dropout", 0.05),
         proprio_mode=m.get("proprio_mode", "full"),
         proprio_dropout_rate=m.get("proprio_dropout_rate", 0.3),
     )
-    return Pi0Fast(model_cfg, stats).to(device)
+    # device is threaded in (not just used for the trailing .to) so the policy
+    # can be constructed directly on the GPU — see build_context.
+    return Pi0Fast(model_cfg, stats, device=device).to(device)

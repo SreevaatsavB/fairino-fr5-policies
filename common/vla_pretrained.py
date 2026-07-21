@@ -1,6 +1,7 @@
 """
 common/vla_pretrained.py — shared helpers for the π0-family VLA policies
-(pi0, pi05): verified pretrained-weight loading and VLM LoRA injection.
+(pi0, pi05, pi0_fast): construction, verified pretrained-weight loading,
+optional k-bit quantization, and VLM LoRA injection.
 
 Why this exists: lerobot's PI0Policy/PI05Policy constructors build PaliGemma
 FROM CONFIG (random init, no download), and their from_pretrained loads with
@@ -8,7 +9,177 @@ strict=False, printing — not raising — on missing keys. Under transformers
 >= 5.4 (which dropped the `.vision_model` nesting inside SigLIP) that silently
 leaves the ENTIRE vision tower random-init. These helpers load with a
 version-proof remap and refuse to continue on a partial match.
+
+The build order the wrappers follow, and why it is that order:
+
+    with build_context(device, dtype):      # 1. construct ON the GPU, in bf16
+        policy = PI05Policy(lerobot_cfg)
+    warn_or_load_pretrained(policy, cfg)    # 2. real weights (fp) — must precede (3)
+    quantize_vlm(policy, cfg.quantize, ...) # 3. NF4 the frozen VLM
+    _inject_vlm_lora(policy, ...)           # 4. adapters on top -> QLoRA
+
+(2) before (3) because quantization is destructive: NF4-ing random weights and
+then load_state_dict-ing over Params4bit does not round-trip. (3) before (4)
+because peft must see Linear4bit to build lora.Linear4bit wrappers.
 """
+
+from contextlib import contextmanager
+
+_TORCH_DTYPES = {
+    "bfloat16": "bfloat16", "bf16": "bfloat16",
+    "float16":  "float16",  "fp16": "float16", "half": "float16",
+    "float32":  "float32",  "fp32": "float32", "float": "float32",
+}
+
+
+@contextmanager
+def build_context(device, dtype: str = None):
+    """Construct a VLA directly on `device` — never staged through host RAM.
+
+    lerobot builds the policy wherever torch's default device points (CPU), then
+    `.to(config.device)` at the end. For pi0/pi05 that means ~3.5B params
+    materialise as fp32 in HOST RAM first: ~14 GB of allocation churn that
+    OOM-kills a container with a modest cgroup memory limit ("the kernel appears
+    to have died") long before the GPU is ever touched. Pointing torch's default
+    device at the GPU for the duration of __init__ makes every nn.Linear
+    allocate straight into VRAM, so peak host RAM stays near zero and the
+    trailing `.to(device)` becomes a no-op.
+
+    `dtype` additionally redirects torch's default dtype, halving the build's
+    peak VRAM (~14 GB fp32 -> ~7 GB bf16). It is OFF by default because it is
+    not numerically free: anything computed at construction time lands in bf16
+    rather than fp32. Parameters do not care (the pretrained load overwrites
+    every one of them), but a buffer derived at __init__ — RoPE inverse
+    frequencies being the classic case — would keep the reduced precision.
+    transformers guards inv_freq with an explicit `.float()`, so bf16 is
+    believed safe here; pass it only when the fp32 build genuinely will not fit,
+    which on a 40 GB+ card it does.
+
+    No-op on CPU/MPS, where there is nowhere better to build than the default.
+    """
+    import torch
+
+    want_cuda = str(device).startswith("cuda") and torch.cuda.is_available()
+    if not want_cuda:
+        yield
+        return
+
+    prev = torch.get_default_dtype()
+    if dtype is not None:
+        # default dtype only accepts floating types; bf16/fp16/fp32 all qualify.
+        torch.set_default_dtype(getattr(torch, _TORCH_DTYPES.get(str(dtype).lower(), "float32")))
+    try:
+        with torch.device(device):
+            yield
+    finally:
+        torch.set_default_dtype(prev)
+
+
+def quantize_vlm(policy, mode: str, tag: str, *, lora_rank: int = 0,
+                 expert_only: bool = False, compute_dtype=None):
+    """QLoRA-style k-bit quantization of the FROZEN VLM, in place. No-op if off.
+
+    Swaps every nn.Linear inside the PaliGemma tower for a bitsandbytes
+    Linear4bit (NF4 + double quantization) or Linear8bitLt, then moves each one
+    to the GPU IMMEDIATELY — bitsandbytes quantizes lazily on `.cuda()`, so
+    doing it layer-by-layer frees each full-precision weight as we go and keeps
+    the peak footprint at one layer rather than a second copy of the model.
+
+    NF4 stores weights as 4-bit normal-float with fp16/bf16 dequantization at
+    matmul time: the 2B VLM drops ~4.6 GB (bf16) -> ~1.4 GB, which is what buys
+    back the headroom for a larger batch size. Matmuls still run in
+    `compute_dtype`, so throughput is close to bf16; the cost is a small,
+    well-documented quality hit that LoRA adapters largely absorb.
+
+    Deliberately NOT quantized:
+      • the action expert — it is FULLY trained; 4-bit weights cannot take a
+        gradient, so quantizing it would silently freeze the one part that must
+        learn. Only `.paligemma` is touched.
+      • lm_head / embeddings — vocabulary-sized and weight-tied, and pi0_fast
+        extends them with FAST action tokens that must stay trainable.
+      • norms — 1-D, negligible memory, and quantization hurts them most.
+
+    Requires adapters (or an explicitly trained action expert), because a 4-bit
+    base is frozen by construction: NF4 + no LoRA + no expert would train
+    nothing at all.
+    """
+    import torch
+    import torch.nn as nn
+
+    mode = (mode or "none").lower()
+    if mode in ("none", "off", "false", ""):
+        return
+    if mode not in ("nf4", "int8"):
+        raise ValueError(f"[{tag}] model.quantize must be one of "
+                         f"'none' | 'nf4' | 'int8', got {mode!r}")
+    if lora_rank <= 0 and not expert_only:
+        raise ValueError(
+            f"[{tag}] quantize={mode!r} freezes the VLM (4-bit weights take no "
+            f"gradient) but vlm_lora_rank=0 and train_expert_only=False — nothing "
+            f"would train. Set model.vlm_lora_rank > 0 for QLoRA.")
+    try:
+        import bitsandbytes as bnb
+    except ImportError as e:
+        raise RuntimeError(
+            f"[{tag}] model.quantize={mode!r} needs bitsandbytes "
+            f"(pip install bitsandbytes)") from e
+    if not torch.cuda.is_available():
+        raise RuntimeError(f"[{tag}] bitsandbytes k-bit quantization is CUDA-only")
+
+    compute_dtype = compute_dtype or torch.bfloat16
+    vlm = policy.model.paligemma_with_expert.paligemma
+    skip = ("lm_head", "embed_tokens", "embed_out")
+
+    n_swapped, saved = 0, 0
+
+    def _swap(module, prefix=""):
+        nonlocal n_swapped, saved
+        for name, child in list(module.named_children()):
+            path = f"{prefix}.{name}" if prefix else name
+            if isinstance(child, nn.Linear) and not any(s in path for s in skip):
+                w, b = child.weight.data, (child.bias.data if child.bias is not None else None)
+                if mode == "nf4":
+                    new = bnb.nn.Linear4bit(
+                        child.in_features, child.out_features,
+                        bias=b is not None, compute_dtype=compute_dtype,
+                        quant_type="nf4", compress_statistics=True,  # double-quant
+                    )
+                    new.weight = bnb.nn.Params4bit(
+                        w.to(compute_dtype), requires_grad=False,
+                        quant_type="nf4", compress_statistics=True)
+                else:
+                    new = bnb.nn.Linear8bitLt(
+                        child.in_features, child.out_features,
+                        bias=b is not None, has_fp16_weights=False, threshold=6.0)
+                    new.weight = bnb.nn.Int8Params(
+                        w.to(torch.float16), requires_grad=False, has_fp16_weights=False)
+                if b is not None:
+                    new.bias = nn.Parameter(b.to(compute_dtype), requires_grad=False)
+                # move NOW: this is where bnb actually quantizes, and it lets the
+                # full-precision weight above be freed before the next layer is built.
+                setattr(module, name, new.to("cuda"))
+                n_swapped += 1
+                saved += w.numel() * (w.element_size() - (0.5 if mode == "nf4" else 1))
+                del w, b, child
+            else:
+                _swap(child, path)
+
+    _swap(vlm)
+    torch.cuda.empty_cache()
+
+    # QLoRA + gradient checkpointing: the checkpointed blocks sit behind a fully
+    # frozen base, so without an input that requires grad the recomputed graph is
+    # detached and the adapters receive no gradient at all (silent no-op training).
+    if getattr(policy.config, "gradient_checkpointing", False):
+        try:
+            vlm.enable_input_require_grads()
+        except AttributeError:
+            print(f"[{tag}] WARNING: could not enable input grads on the VLM; if "
+                  f"LoRA grads come back None, set gradient_checkpointing: false")
+
+    print(f"[{tag}] quantized VLM to {mode.upper()}: {n_swapped} Linear layers, "
+          f"~{saved/1e9:.1f} GB saved (action expert + lm_head left in "
+          f"{str(compute_dtype).split('.')[-1]})")
 
 def _load_pretrained_weights(policy, repo_id: str, tag: str):
     """Load openpi-ported weights with version-proof key remapping + a HARD check.

@@ -47,6 +47,13 @@ model:
   freeze_vision_encoder: false
   train_expert_only: false
 
+  # k-bit quantization of the FROZEN VLM (QLoRA): none | nf4 | int8.
+  # nf4 stores the 2B VLM as 4-bit normal-float (~4.6 GB -> ~1.4 GB) and dequantizes
+  # to bf16 at matmul time, so speed is close to unquantized and the freed VRAM goes
+  # into batch size. Requires vlm_lora_rank > 0 — 4-bit weights take no gradient, so
+  # the adapters carry the whole VLM update. The action expert is never quantized.
+  quantize: "none"
+
   # proprioception handling — benchmark axis (see docs/proprioception_modes.md)
   #   full | dropout | none   (override: python common/train.py --policy pi05 --proprio none)
   proprio_mode: full

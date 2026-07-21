@@ -40,13 +40,15 @@ from lerobot.configs.types import PolicyFeature, FeatureType, NormalizationMode
 # explicit path so the import works no matter how model.py gets loaded.
 try:
     from proprio import ProprioConfig, mask_state, describe as _describe_proprio
-    from vla_pretrained import _inject_vlm_lora, warn_or_load_pretrained
+    from vla_pretrained import (_inject_vlm_lora, warn_or_load_pretrained,
+                                build_context, quantize_vlm)
 except ImportError:  # pragma: no cover
     import sys as _sys
     from pathlib import Path as _Path
     _sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "common"))
     from proprio import ProprioConfig, mask_state, describe as _describe_proprio
-    from vla_pretrained import _inject_vlm_lora, warn_or_load_pretrained
+    from vla_pretrained import (_inject_vlm_lora, warn_or_load_pretrained,
+                                build_context, quantize_vlm)
 
 try:
     from transformers import AutoTokenizer
@@ -118,6 +120,13 @@ class Pi0Config:
     freeze_vision_encoder:  bool = False
     train_expert_only:      bool = False
 
+    # k-bit quantization of the FROZEN VLM (QLoRA): "none" | "nf4" | "int8".
+    # "nf4" takes the 2B VLM from ~4.6 GB to ~1.4 GB, which is what makes a larger
+    # batch fit on a 24-48 GB card. Requires vlm_lora_rank > 0 (a 4-bit base cannot
+    # take a gradient, so the adapters carry the entire VLM update). The action
+    # expert is never quantized — it is fully trained.
+    quantize: str = "none"
+
     # proprioception handling (see common/proprio.py): full | dropout | none
     proprio_mode:         str   = "full"
     proprio_dropout_rate: float = 0.3
@@ -159,12 +168,20 @@ def _lerobot_config(cfg: Pi0Config) -> _LRConfig:
 
 
 class Pi0(nn.Module):
-    def __init__(self, cfg: Pi0Config, stats: dict):
+    def __init__(self, cfg: Pi0Config, stats: dict, device=None):
         super().__init__()
         self.cfg = cfg
         self.image_keys = _image_keys(cfg.camera_names)
-        self.policy = PI0Policy(_lerobot_config(cfg))
+        # Build order matters — see the module docstring of common/vla_pretrained.py.
+        # build_context puts the 2.3B params straight into VRAM instead of
+        # materialising them in host RAM first (which OOM-kills a memory-capped
+        # container before the GPU is ever touched). Pass cfg.dtype as the second
+        # arg to halve the build's peak VRAM if the fp32 build does not fit.
+        with build_context(device):
+            self.policy = PI0Policy(_lerobot_config(cfg))
         warn_or_load_pretrained(self.policy, cfg, "pi0")
+        quantize_vlm(self.policy, cfg.quantize, "pi0",
+                     lora_rank=cfg.vlm_lora_rank, expert_only=cfg.train_expert_only)
         if cfg.vlm_lora_rank > 0:
             _inject_vlm_lora(self.policy, cfg.vlm_lora_rank, cfg.vlm_lora_alpha,
                              cfg.vlm_lora_dropout, "pi0")
@@ -296,7 +313,10 @@ def build_model(cfg: dict, stats: dict, device) -> Pi0:
         gradient_checkpointing=m.get("gradient_checkpointing", True),
         freeze_vision_encoder=m.get("freeze_vision_encoder", False),
         train_expert_only=m.get("train_expert_only", False),
+        quantize=m.get("quantize", "none") or "none",
         proprio_mode=m.get("proprio_mode", "full"),
         proprio_dropout_rate=m.get("proprio_dropout_rate", 0.3),
     )
-    return Pi0(model_cfg, stats).to(device)
+    # device is threaded in (not just used for the trailing .to) so the policy
+    # can be constructed directly on the GPU — see build_context.
+    return Pi0(model_cfg, stats, device=device).to(device)

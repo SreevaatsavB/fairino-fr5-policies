@@ -36,6 +36,16 @@ model:
   dtype: "bfloat16"
   gradient_checkpointing: true
 
+  # k-bit quantization of the FROZEN VLM: none | nf4 | int8. OFF by default because
+  # the full finetune above is pi0_fast's native recipe. Enabling it necessarily
+  # converts the run to QLoRA (a 4-bit base takes no gradient), so it REQUIRES
+  # vlm_lora_rank > 0. lm_head and the token embeddings are never quantized, so the
+  # FAST action tokens remain learnable either way.
+  quantize: "none"
+  vlm_lora_rank: 0        # >0 -> LoRA on the VLM q/k/v/o + frozen base (required by quantize)
+  vlm_lora_alpha: 32
+  vlm_lora_dropout: 0.05
+
   # proprioception handling — benchmark axis (see docs/proprioception_modes.md)
   #   full | dropout | none   (override: python common/train.py --policy pi0_fast --proprio none)
   proprio_mode: full
