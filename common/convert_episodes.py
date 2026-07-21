@@ -102,7 +102,7 @@ def _nearest_indices(csv_ts: np.ndarray, cam_ts: np.ndarray) -> np.ndarray:
 
 
 def _load_episode(ep_dir: Path, max_frames: int | None, action_space: str = "joint",
-                  task_override: str | None = None):
+                  task_override: str | None = None, cameras=(VIDEO_KEY,)):
     """Resample one raw episode onto its camera timestamps.
 
     action_space:
@@ -138,6 +138,15 @@ def _load_episode(ep_dir: Path, max_frames: int | None, action_space: str = "joi
 
     if max_frames is not None:
         idx = idx[:max_frames]
+
+    # Cap to the SHORTEST used camera so every dataset row has a real frame in
+    # EVERY view (the two cams can differ by a frame; without this the last row
+    # would reference a scene frame that doesn't exist).
+    for cam_key in cameras:
+        _, tsf = CAMERAS[cam_key]
+        tsf_path = ep_dir / tsf
+        if tsf_path.exists():
+            idx = idx[:len(np.load(tsf_path))]
 
     rows = df.iloc[idx].reset_index(drop=True)
     n = len(rows)
@@ -242,7 +251,7 @@ def convert(episodes_dir: Path, out_dir: Path, extract_frames: bool,
     cursor = 0  # running absolute row index across episodes
 
     for ep_idx, ep_dir in enumerate(ep_dirs):
-        loaded = _load_episode(ep_dir, max_frames, action_space, task_override)
+        loaded = _load_episode(ep_dir, max_frames, action_space, task_override, cameras=cameras)
         if loaded is None:
             continue
         frame, task = loaded
