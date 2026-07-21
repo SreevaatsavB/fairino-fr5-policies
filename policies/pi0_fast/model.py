@@ -39,14 +39,16 @@ from lerobot.configs.types import PolicyFeature, FeatureType, NormalizationMode
 try:
     from proprio import ProprioConfig, mask_state, describe as _describe_proprio
     from vla_pretrained import (warn_or_load_pretrained, _inject_vlm_lora,
-                                build_context, quantize_vlm)
+                                build_context, quantize_vlm,
+                                pick_build_dtype)
 except ImportError:  # pragma: no cover
     import sys as _sys
     from pathlib import Path as _Path
     _sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "common"))
     from proprio import ProprioConfig, mask_state, describe as _describe_proprio
     from vla_pretrained import (warn_or_load_pretrained, _inject_vlm_lora,
-                                build_context, quantize_vlm)
+                                build_context, quantize_vlm,
+                                pick_build_dtype)
 
 try:
     from transformers import AutoTokenizer
@@ -147,7 +149,7 @@ class Pi0Fast(nn.Module):
         # build_context puts the params straight into VRAM instead of materialising
         # them in host RAM first (which OOM-kills a memory-capped container before
         # the GPU is ever touched).
-        with build_context(device):
+        with build_context(device, pick_build_dtype(cfg.dtype, device, "pi0_fast")):
             self.policy = PI0FastPolicy(_lerobot_config(cfg))
         warn_or_load_pretrained(self.policy, cfg, "pi0_fast")
         quantize_vlm(self.policy, cfg.quantize, "pi0_fast", lora_rank=cfg.vlm_lora_rank)

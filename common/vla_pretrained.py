@@ -75,6 +75,34 @@ def build_context(device, dtype: str = None):
         torch.set_default_dtype(prev)
 
 
+def pick_build_dtype(cfg_dtype: str, device, tag: str, tight_gb: float = 24.0):
+    """Decide whether to construct in reduced precision, based on FREE VRAM.
+
+    Constructing pi0/pi05 in fp32 costs ~21 GB transiently before lerobot casts to
+    cfg.dtype. That is fine on an empty 40 GB+ card and is the numerically safest
+    path, so it stays the default. But free VRAM is frequently far below total:
+    a crashed kernel keeps its CUDA context and its allocations alive, and inside a
+    container those processes usually cannot be signalled (nvidia-smi reports host
+    PIDs). Rather than fail with a CUDA OOM that looks like the model is too big for
+    the GPU, drop the build to cfg.dtype (~7 GB) when the headroom is not there.
+
+    Safe because every parameter is overwritten by the pretrained load moments later;
+    only construction-time buffers keep the reduced precision, and transformers
+    guards the one that matters (RoPE inv_freq) with an explicit .float().
+    """
+    import torch
+
+    if not (str(device).startswith("cuda") and torch.cuda.is_available()):
+        return None
+    free_gb = torch.cuda.mem_get_info()[0] / 1e9
+    if free_gb >= tight_gb:
+        return None
+    print(f"[{tag}] only {free_gb:.1f} GB VRAM free (< {tight_gb:.0f} GB) — constructing in "
+          f"{cfg_dtype} (~7 GB) instead of fp32 (~21 GB). If this is unexpected, a dead "
+          f"process is holding VRAM; restarting the pod is the clean fix.")
+    return cfg_dtype
+
+
 def quantize_vlm(policy, mode: str, tag: str, *, lora_rank: int = 0,
                  expert_only: bool = False, compute_dtype=None):
     """QLoRA-style k-bit quantization of the FROZEN VLM, in place. No-op if off.
