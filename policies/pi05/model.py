@@ -71,6 +71,10 @@ class Pi05Config:
     state_dim:  int  = 7
     action_dim: int  = 7
     chunk_size: int  = 50
+    # inference-only: execute the first k of each chunk then re-plan (receding horizon).
+    # None = execute the whole chunk (most open-loop). Overridable via deploy.py
+    # --n-action-steps; NOT temporal ensembling, which is too slow for a 2.3B VLA at 30 Hz.
+    n_action_steps: int = None
     use_image:  bool = True
     num_inference_steps:   int = 10
     max_state_dim:         int = 32
@@ -132,7 +136,7 @@ def _lerobot_config(cfg: Pi05Config) -> _LRConfig:
     return _LRConfig(
         n_obs_steps=1,
         chunk_size=cfg.chunk_size,
-        n_action_steps=cfg.chunk_size,
+        n_action_steps=cfg.n_action_steps or cfg.chunk_size,
         input_features=input_features,
         output_features={ACTION_KEY: PolicyFeature(type=FeatureType.ACTION,
                                                     shape=(cfg.action_dim,))},
@@ -268,6 +272,7 @@ def build_model(cfg: dict, stats: dict, device) -> Pi05:
     model_cfg = Pi05Config(
         state_dim=m["state_dim"], action_dim=m["action_dim"],
         chunk_size=d["chunk_size"], use_image=d["use_image"],
+        n_action_steps=m.get("n_action_steps"),  # inference receding-horizon knob
         num_inference_steps=m.get("num_inference_steps", 10),
         max_state_dim=m.get("max_state_dim", 32),
         max_action_dim=m.get("max_action_dim", 32),

@@ -24,6 +24,12 @@ model:
   max_state_dim: 32
   max_action_dim: 32
   tokenizer_max_length: 200
+  # inference smoothing (no effect on training/weights; override at deploy via
+  # deploy.py --n-action-steps). Execute the first k of each chunk then re-plan
+  # (receding horizon); null = execute the whole chunk (most open-loop, jerkiest at
+  # the ~1.67 s boundary). This is the right smoothing for the VLAs — NOT temporal
+  # ensembling, which re-predicts every 33 ms step and blows the 30 Hz budget on a 2.3B VLM.
+  n_action_steps: null
 
   # π0-FAST pretrained weights — REQUIRED for finetuning. PI0FastPolicy(config)
   # random-inits the whole model; only loading this checkpoint gives real weights.

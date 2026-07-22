@@ -155,14 +155,29 @@ So `n_action_steps` controls the trade-off:
 - **smaller** → re-query more often → more reactive, but the heavy call fires more frequently
 
 Diffusion uses `n_action_steps=8` of a 16-step chunk (discards the back half — those far-future
-predictions are least reliable). π0 in this repo executes the **whole** chunk
-(`n_action_steps = chunk_size`) before re-querying. DiT (dit_flow) used to do the same — it was
+predictions are least reliable). DiT (dit_flow) used to execute the whole chunk — it was
 extremely jerky on the FR5 (hard cut between independently-sampled 32-step chunks) — and now
 defaults to **temporal ensembling** (`temporal_ensemble_coeff: 0.01`): a full chunk is re-predicted
 every step and overlapping predictions are blended, exactly like ACT. Set the coeff to `null` for
-the queue behaviour, with `n_action_steps < chunk_size` for receding horizon; both knobs are
-inference-only and can be overridden on an existing checkpoint via
+the queue behaviour; both dit_flow knobs are inference-only and overridable via
 `deploy.py --te-coeff / --n-action-steps`.
+
+**The π-family (pi0 / pi05 / pi0_fast) do NOT use temporal ensembling, and shouldn't.** TE
+re-predicts the full chunk *every 33 ms step*; one π0/π0.5 chunk is a 10-step ODE through a
+2.3 B PaliGemma (~50–100 ms), so re-predicting every step blows the 30 Hz budget. Their
+smoothing knob is **receding horizon** instead: `model.n_action_steps` (default `null` =
+execute the whole 50-step chunk, the most open-loop / jerkiest setting) — set it to `k < chunk_size`
+to re-plan every `k` steps. It is inference-only (works on existing checkpoints, no retraining)
+and overridable at deploy:
+
+```bash
+# re-plan every 10 steps (~0.33 s) instead of coasting through all 50 (~1.67 s):
+python common/deploy.py --hf-repo <you>/fr5-pi0-lora --n-action-steps 10
+```
+
+Smaller `k` = smoother / more reactive but the heavy model fires more often (keep
+`k × 33 ms > ~80 ms`, i.e. `k ≥ 3`, or the refill step overruns the budget). π0-FAST decodes
+tokens (~3–5 ms), so it tolerates a much smaller `k`.
 
 ---
 

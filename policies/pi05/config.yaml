@@ -38,6 +38,12 @@ model:
   max_action_dim: 32
   tokenizer_max_length: 200    # longer than pi0's 48
   num_inference_steps: 10
+  # inference smoothing (no effect on training/weights; override at deploy via
+  # deploy.py --n-action-steps). Execute the first k of each chunk then re-plan
+  # (receding horizon); null = execute the whole chunk (most open-loop, jerkiest at
+  # the ~1.67 s boundary). This is the right smoothing for the VLAs — NOT temporal
+  # ensembling, which re-predicts every 33 ms step and blows the 30 Hz budget on a 2.3B VLM.
+  n_action_steps: null
 
   # memory / VRAM (see notebooks/train_pi05_runpod.ipynb for per-GPU guidance):
   #   80 GB: full finetune as-is        48 GB: full w/ batch 2, or freeze_vision_encoder
