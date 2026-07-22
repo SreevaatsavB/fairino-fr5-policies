@@ -65,8 +65,10 @@ BATCH_SIZE   = None      # None -> auto from free VRAM; set an int to override
 MAX_STEPS    = 30_000    # optimizer-step budget. This is how openpi finetunes the pi family
                          # (30k steps at batch 32) — NOT epochs. 100 epochs here would be
                          # ~330k steps, 11x the official budget, with no evidence of benefit.
+                         # Set None to budget by EPOCHS instead (MAX_EPOCHS then drives both
+                         # the stop and the cosine-decay horizon).
 WARMUP_STEPS = 1_000     # linear warmup, then cosine decay to LR_MIN
-MAX_EPOCHS   = 100       # hard cap only; the run stops at MAX_STEPS first (~9-10 epochs)
+MAX_EPOCHS   = 100       # hard cap when MAX_STEPS is set; THE budget when MAX_STEPS=None
 LR           = 2.5e-5    # PEAK lr (openpi: 5e-5 at batch 32-64; scaled for our smaller batch)
 LR_MIN       = 2.5e-6    # cosine floor
 WEIGHT_DECAY = 0.01
