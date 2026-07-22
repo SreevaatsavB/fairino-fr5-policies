@@ -64,7 +64,8 @@ _IMG_TRANSFORM = transforms.Compose([
 
 # ── model ─────────────────────────────────────────────────────────────────────
 
-def load_policy(ckpt_path: str, device: torch.device, model_overrides: dict | None = None):
+def load_policy(ckpt_path: str, device: torch.device, model_overrides: dict | None = None,
+                inference_quantize: str | None = None):
     ckpt     = torch.load(ckpt_path, map_location=device, weights_only=False)
     cfg_dict = ckpt["config"]
     policy   = ckpt.get("policy", "act")
@@ -78,6 +79,17 @@ def load_policy(ckpt_path: str, device: torch.device, model_overrides: dict | No
             cfg_dict["model"][k] = v
             print(f"[deploy] OVERRIDE model.{k}: {old} -> {v}")
 
+    # Post-training quantization for low-VRAM inference (--quantize nf4|int8).
+    # Force the BUILD unquantized regardless of what the checkpoint trained with:
+    # quantization is applied AFTER load_state_dict below, because a float
+    # checkpoint cannot be loaded into params that are already 4-bit. Works even
+    # for a checkpoint trained in bf16 — post-hoc NF4 is standard PTQ.
+    if inference_quantize:
+        prev = cfg_dict["model"].get("quantize", "none")
+        cfg_dict["model"]["quantize"] = "none"
+        print(f"[deploy] --quantize {inference_quantize}: building unquantized "
+              f"(was {prev!r}); quantizing after the weights load")
+
     # For the VLA policies (pi0/pi05/pi0_fast), skip re-downloading the gated ~6 GB
     # base — the checkpoint's model_state carries every weight.
     from vla_pretrained import strip_pretrained_for_checkpoint  # noqa: E402
@@ -86,6 +98,13 @@ def load_policy(ckpt_path: str, device: torch.device, model_overrides: dict | No
     policy_mod = _load_policy_module(policy)
     model = policy_mod.build_model(cfg_dict, ckpt["stats"], device)
     model.load_state_dict(ckpt["model_state"])
+
+    if inference_quantize:
+        if policy not in ("pi0", "pi05", "pi0_fast"):
+            raise SystemExit(f"--quantize only applies to the pi-family VLAs, not {policy!r}")
+        from vla_pretrained import quantize_for_inference  # noqa: E402
+        quantize_for_inference(model, inference_quantize, policy)
+
     model.eval()
 
     action_space = ckpt.get("action_space", "joint")
@@ -176,7 +195,8 @@ def run(args):
             else float(args.te_coeff))
     if args.n_action_steps is not None:
         overrides["n_action_steps"] = args.n_action_steps
-    model, cfg_dict, action_space, policy = load_policy(args.checkpoint, device, overrides)
+    model, cfg_dict, action_space, policy = load_policy(
+        args.checkpoint, device, overrides, inference_quantize=args.quantize)
     use_image = cfg_dict["dataset"]["use_image"] and not args.no_image
 
     # Record every predicted action over the rollout (shared schema with the offline
@@ -338,6 +358,11 @@ def main():
                         help="inference-only override: receding horizon — execute the first "
                              "k actions of each chunk then re-plan (used when ensembling is "
                              "off; dit_flow)")
+    parser.add_argument("--quantize", choices=["nf4", "int8"], default=None,
+                        help="pi-family only: post-training quantization of the VLM for "
+                             "low-VRAM inference. Works on a checkpoint trained WITHOUT "
+                             "quantization (merges any LoRA first, then NF4/int8s the base). "
+                             "Needs a Turing-or-newer GPU. pi0 NF4 ~ 3-4 GB total.")
     run(parser.parse_args())
 
 

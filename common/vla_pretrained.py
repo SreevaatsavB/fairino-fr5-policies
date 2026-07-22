@@ -114,7 +114,7 @@ def pick_build_dtype(cfg_dtype: str, device, tag: str, tight_gb: float = 24.0):
 
 
 def quantize_vlm(policy, mode: str, tag: str, *, lora_rank: int = 0,
-                 expert_only: bool = False, compute_dtype=None):
+                 expert_only: bool = False, compute_dtype=None, inference: bool = False):
     """QLoRA-style k-bit quantization of the FROZEN VLM, in place. No-op if off.
 
     Swaps every nn.Linear inside the PaliGemma tower for a bitsandbytes
@@ -150,7 +150,9 @@ def quantize_vlm(policy, mode: str, tag: str, *, lora_rank: int = 0,
     if mode not in ("nf4", "int8"):
         raise ValueError(f"[{tag}] model.quantize must be one of "
                          f"'none' | 'nf4' | 'int8', got {mode!r}")
-    if lora_rank <= 0 and not expert_only:
+    if not inference and lora_rank <= 0 and not expert_only:
+        # training-time guard only: a 4-bit base is frozen, so QLoRA needs adapters
+        # or a trained expert or nothing learns. At inference nothing trains anyway.
         raise ValueError(
             f"[{tag}] quantize={mode!r} freezes the VLM (4-bit weights take no "
             f"gradient) but vlm_lora_rank=0 and train_expert_only=False — nothing "
@@ -208,7 +210,8 @@ def quantize_vlm(policy, mode: str, tag: str, *, lora_rank: int = 0,
     # QLoRA + gradient checkpointing: the checkpointed blocks sit behind a fully
     # frozen base, so without an input that requires grad the recomputed graph is
     # detached and the adapters receive no gradient at all (silent no-op training).
-    if getattr(policy.config, "gradient_checkpointing", False):
+    # Irrelevant at inference (no backward), so skip it there.
+    if not inference and getattr(policy.config, "gradient_checkpointing", False):
         try:
             vlm.enable_input_require_grads()
         except AttributeError:
@@ -218,6 +221,55 @@ def quantize_vlm(policy, mode: str, tag: str, *, lora_rank: int = 0,
     print(f"[{tag}] quantized VLM to {mode.upper()}: {n_swapped} Linear layers, "
           f"~{saved/1e9:.1f} GB saved (action expert + lm_head left in "
           f"{str(compute_dtype).split('.')[-1]})")
+
+
+def _merge_and_unload_lora(root, tag: str) -> int:
+    """Fold injected LoRA adapters into their base Linear weights and replace each
+    LoRA wrapper with the plain (now-updated) nn.Linear, so the tree is uniform
+    nn.Linear again. Injected lora layers are NOT nn.Linear, so post-hoc
+    quantization must not see them — it would quantize lora_A/lora_B and the base
+    separately and corrupt the merge. No-op when there are no adapters."""
+    try:
+        from peft.tuners.lora import LoraLayer
+    except Exception:
+        return 0
+    merged = 0
+    for m in root.modules():
+        if isinstance(m, LoraLayer):
+            m.merge()                      # base_layer.weight += B@A * scaling (function-preserving)
+            merged += 1
+    if merged:
+        def _walk(module):
+            for name, child in list(module.named_children()):
+                if isinstance(child, LoraLayer):
+                    setattr(module, name, child.base_layer)   # unload -> plain nn.Linear
+                else:
+                    _walk(child)
+        _walk(root)
+        print(f"[{tag}] merged {merged} LoRA adapters into the base for inference")
+    return merged
+
+
+def quantize_for_inference(wrapper, mode: str, tag: str):
+    """POST-TRAINING quantization of a TRAINED checkpoint, for low-VRAM inference.
+
+    Call this AFTER load_state_dict — the opposite order from training-time
+    quantize_vlm. You cannot load a float checkpoint into params that are already
+    4-bit, so deploy must: build unquantized -> load real weights -> quantize here.
+    A model trained WITHOUT quantization is fine: post-training NF4/int8 is exactly
+    what QLoRA does at its start, just applied to trained weights instead of the base.
+
+    Any LoRA adapters are merged into the base first, so the learned update is
+    preserved and the tree is plain nn.Linear before quantization. bitsandbytes
+    NF4/int8 kernels require a Turing-or-newer GPU (compute capability >= 7.5)."""
+    mode = (mode or "none").lower()
+    if mode in ("none", "off", "false", ""):
+        return
+    policy = wrapper.policy
+    vlm = policy.model.paligemma_with_expert.paligemma
+    _merge_and_unload_lora(vlm, tag)
+    quantize_vlm(policy, mode, tag, inference=True)
+
 
 def _load_pretrained_weights(policy, repo_id: str, tag: str):
     """Load openpi-ported weights with version-proof key remapping + a HARD check.
