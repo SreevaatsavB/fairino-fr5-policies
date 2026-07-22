@@ -145,6 +145,7 @@ class Pi0Fast(nn.Module):
     def __init__(self, cfg: Pi0FastConfig, stats: dict, device=None):
         super().__init__()
         self.cfg    = cfg
+        self._quantized = str(getattr(cfg, 'quantize', 'none')).lower() in ('nf4', 'int8')
         # Build order matters — see the module docstring of common/vla_pretrained.py.
         # build_context puts the params straight into VRAM instead of materialising
         # them in host RAM first (which OOM-kills a memory-capped container before
@@ -229,11 +230,22 @@ class Pi0Fast(nn.Module):
             batch["action_is_pad"] = action_is_pad
         return batch
 
+    def _amp(self):
+        """Autocast the policy forward to bf16 when the VLM is k-bit quantized.
+        QLoRA keeps the LoRA adapters in fp32, which would otherwise upcast
+        activations and collide with the bf16 (unquantized) action expert —
+        `mat1 float != mat2 BFloat16`. No-op when not quantized / off-CUDA."""
+        from contextlib import nullcontext
+        if self._quantized and torch.cuda.is_available():
+            return torch.autocast("cuda", dtype=torch.bfloat16)
+        return nullcontext()
+
     def forward(self, obs_state, actions, action_is_pad, obs_image=None, task=None):
         """pi0_fast.forward has no `reduction` param — returns (loss, loss_item, 0.0)."""
-        loss, _ = self.policy.forward(
-            self._make_batch(obs_state, actions, action_is_pad, obs_image, task)
-        )
+        with self._amp():
+            loss, _ = self.policy.forward(
+                self._make_batch(obs_state, actions, action_is_pad, obs_image, task)
+            )
         return loss, loss.item(), 0.0
 
     def reset(self):
@@ -241,9 +253,10 @@ class Pi0Fast(nn.Module):
 
     @torch.no_grad()
     def predict(self, obs_state, obs_image=None, task=None):
-        action_norm = self.policy.select_action(
-            self._make_batch(obs_state, obs_image=obs_image, task=task, training=False)
-        )
+        with self._amp():
+            action_norm = self.policy.select_action(
+                self._make_batch(obs_state, obs_image=obs_image, task=task, training=False)
+            )
         return self._unnorm_action(action_norm)
 
 
