@@ -197,10 +197,41 @@ multi-step rollout that exercises these exact paths.
 
 ---
 
-## 9. logging & evaluating the actions
+## 9. loading a checkpoint — local, from the Hub, or quantized
 
-Every `deploy.py` rollout now records its predicted actions to `<ckpt_dir>/rollouts/` (plot
+`deploy.py` takes the checkpoint three ways:
+
+```bash
+# local file (any policy)
+python common/deploy.py --checkpoint policies/act/checkpoints/best.pt
+
+# pulled from the Hub — the repo the RunPod notebook pushed to
+python common/deploy.py --hf-repo <you>/fr5-pi0-lora                  # grabs best.pt
+python common/deploy.py --hf-repo <you>/fr5-pi0-lora --hf-file epoch_0040.pt
+
+# π-family on a low-VRAM GPU: post-training NF4/int8 quantization at load time,
+# even for a checkpoint trained in bf16
+python common/deploy.py --hf-repo <you>/fr5-pi0-lora --quantize nf4
+```
+
+The checkpoint records which policy produced it, so deploy auto-loads the matching
+`policies/<policy>/model.py` — no per-model deploy script. `--quantize` builds the model
+unquantized, loads the trained weights, merges any LoRA adapters into the base, then
+quantizes the VLM — so it works regardless of how the checkpoint was trained. It needs a
+Turing-or-newer GPU and applies only to `pi0`/`pi05`/`pi0_fast`. Full details, memory
+numbers, and the accuracy-cost check: [`quantization.md`](quantization.md).
+
+Inference-only overrides that need **no retraining** (patched into the checkpoint's config
+before build): `--te-coeff <m|off>` (temporal-ensembling coefficient) and `--n-action-steps k`
+(receding horizon) — see §6.
+
+## 10. logging & evaluating the actions
+
+Every `deploy.py` rollout records its predicted actions to `<ckpt_dir>/rollouts/` (plot
 with `tools/plot_actions.py`), and `experiments/eval_on_test.py` replays the held-out test
 episodes to plot **prediction vs ground truth** per action dimension over time (with per-dim
 MAE). Both share one record format (`common/action_record.py`). See
 [`evaluation.md`](evaluation.md) for the full layer, commands, and the open-loop caveat.
+For the π-family trained on RunPod, the notebooks' own eval cells (12c/12d) produce the same
+GT-vs-prediction CSVs plus per-episode replay videos and an interactive dashboard — see
+[`runpod_training.md`](runpod_training.md).

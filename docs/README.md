@@ -2,8 +2,17 @@
 
 plain-English deep dives on each policy in this repo — what it is, how it works, the math, and how it differs from the others. read in this order; each builds on the last.
 
+> **training the π-family VLAs** — the self-contained RunPod notebooks: every parameter,
+> VRAM/speed tuning, checkpointing + resume, Hub push, and the evaluation dashboard, in
+> [`runpod_training.md`](runpod_training.md).
+>
+> **quantization** — QLoRA training (fit a big model on a small pod) and post-training
+> inference quantization (`deploy.py --quantize nf4`), what's/isn't quantized, and the
+> Turing+ requirement, in [`quantization.md`](quantization.md).
+>
 > **how they differ at deployment** — query cadence, temporal ensembling, action queues, the
-> 30 Hz budget, and per-model latency are compared in one place in [`inference.md`](inference.md).
+> 30 Hz budget, per-model latency, and loading checkpoints (local / `--hf-repo` / `--quantize`)
+> are compared in one place in [`inference.md`](inference.md).
 >
 > **evaluating a trained policy** — log predicted actions over time (robot) and compare
 > prediction vs ground truth on the held-out test set (per-dim plots + MAE) with the shared

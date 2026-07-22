@@ -8,13 +8,27 @@ This repo is set up as a centralised policy hub — one shared training/data pip
 
 ## what's in here
 
-| policy | folder | what it is |
-|---|---|---|
-| ACT | `policies/act/` | Action Chunking Transformer — CVAE + transformer, predicts 100-step chunks |
-| Diffusion Policy | `policies/diffusion/` | DDPM with a 1-D U-Net denoiser, 10-step DDIM at inference |
-| DiT + Flow Matching | `policies/dit_flow/` | Diffusion Transformer with flow matching objective, CLIP vision + language |
+| policy | folder | what it is | trains on |
+|---|---|---|---|
+| ACT | `policies/act/` | Action Chunking Transformer — CVAE + transformer, predicts 100-step chunks | CPU / local GPU |
+| Diffusion Policy | `policies/diffusion/` | DDPM with a 1-D U-Net denoiser, 10-step DDIM at inference | local GPU |
+| DiT + Flow Matching | `policies/dit_flow/` | Diffusion Transformer, flow-matching objective, swappable DINOv3/CLIP vision + language | local GPU |
+| π0 | `policies/pi0/` | flow-matching VLA — 2B PaliGemma VLM + 300M action expert | **RunPod** (notebook) |
+| π0.5 | `policies/pi05/` | π0 with a longer language context | **RunPod** (notebook) |
+| π0-FAST | `policies/pi0_fast/` | π0's backbone, actions as discrete FAST tokens (no ODE) | **RunPod** (notebook) |
+| Octo | `policies/octo/` | JAX generalist pretrained on 800k Open-X trajectories | isolated `.venv-octo` |
 
-all three are wrapped around lerobot 0.5.1 and trained on the same FR5 episodes.
+All the lerobot-family policies wrap **lerobot 0.5.1** and share the same FR5
+episodes and `common/` pipeline. The small ones (ACT / Diffusion / DiT) train
+locally with `common/train.py`; the π-family VLAs are too large for the robot box
+and train on a rented GPU via the **self-contained RunPod notebooks** — see
+[`docs/runpod_training.md`](docs/runpod_training.md). Octo lives in its own JAX
+dependency stack (`.venv-octo`) — see [`docs/octo.md`](docs/octo.md).
+
+**Deep dives:** every policy has a plain-English explainer under
+[`docs/`](docs/README.md); runtime/latency is compared in
+[`docs/inference.md`](docs/inference.md); quantization (QLoRA + inference) in
+[`docs/quantization.md`](docs/quantization.md).
 
 ---
 
@@ -46,7 +60,10 @@ then update `dataset.root` in whatever config you're using to point at the outpu
 
 ---
 
-## training
+## training the small policies (ACT / Diffusion / DiT), locally
+
+These train on the robot box or any local GPU (ACT even on CPU) via the shared loop.
+The VLAs (π0 family) are separate — see the RunPod section below.
 
 ```bash
 # ACT
@@ -71,13 +88,52 @@ python common/smoke_test.py dit_flow
 
 ---
 
+## training the VLAs (π0 / π0.5 / π0-FAST) on RunPod
+
+The π-family carries a 2–3 B PaliGemma VLM and won't fit the robot box, so they
+train on a rented GPU via **self-contained notebooks** (no `git clone` needed on the
+pod — the whole pipeline is inline, and the checkpoints stay compatible with
+`deploy.py`):
+
+```
+notebooks/train_pi0_runpod.ipynb        notebooks/train_pi05_runpod.ipynb
+notebooks/train_pi0_fast_runpod.ipynb   notebooks/convert_and_push_dataset.ipynb
+```
+
+Quick version: launch a **Python-3.12** GPU pod, set `HF_TOKEN` (with the PaliGemma
+license accepted) and `HF_DATASET_REPO`, pick `QUANTIZE="nf4"` for a 24–48 GB card,
+and run top-to-bottom. It pulls the dataset, finetunes (QLoRA on the VLM + full
+action expert), evaluates every held-out episode, and pushes `best.pt` to the Hub.
+Full guide — every knob, VRAM/speed tuning, resume, evaluation dashboard:
+**[`docs/runpod_training.md`](docs/runpod_training.md)**.
+
+Quantization (what NF4/QLoRA is, training vs inference, the Turing+ requirement):
+**[`docs/quantization.md`](docs/quantization.md)**.
+
+---
+
 ## deploying on the robot
+
+From a local checkpoint:
 
 ```bash
 python common/deploy.py --checkpoint policies/act/checkpoints/best.pt
 ```
 
-runs at 30 Hz for 150 steps by default. use `--steps N` to change that. if the model was trained with images but the camera isn't connected, `--no-image` falls back to state-only.
+Or pull a checkpoint the RunPod notebook pushed, straight from the Hub:
+
+```bash
+python common/deploy.py --hf-repo <you>/fr5-pi0-lora                 # downloads best.pt
+python common/deploy.py --hf-repo <you>/fr5-pi0-lora --quantize nf4  # NF4 for a low-VRAM GPU
+```
+
+Runs at 30 Hz for 150 steps by default (`--steps N` to change). `--no-image` falls
+back to state-only if the camera isn't connected. `--quantize nf4|int8`
+post-quantizes a π-family checkpoint for a small GPU even if it was trained in bf16
+(Turing+ required — see [`docs/quantization.md`](docs/quantization.md)). Inference
+smoothing knobs `--te-coeff` / `--n-action-steps` work on existing checkpoints with
+no retraining ([`docs/inference.md`](docs/inference.md)). Every rollout logs its
+predicted actions to `<ckpt_dir>/rollouts/` ([`docs/evaluation.md`](docs/evaluation.md)).
 
 ---
 
@@ -98,12 +154,24 @@ common/
   convert_episodes.py    raw episodes → LeRobot dataset
   dataset.py             parquet + video → PyTorch DataLoader
   train.py               shared training loop (--policy <name>)
-  deploy.py              load any checkpoint, run on the FR5
+  deploy.py              load any checkpoint (local or --hf-repo), run on the FR5
+  vla_pretrained.py      π-family: verified pretrained load, LoRA, NF4/int8 quantize
+  lerobot_patches.py     transformers/torch compat shims for lerobot 0.5.1
   smoke_test.py          quick end-to-end sanity check
 policies/
-  act/                   ACT wrapper + configs
-  diffusion/             Diffusion Policy wrapper + configs
-  dit_flow/              DiT + flow matching wrapper + configs
+  act/  diffusion/  dit_flow/     small policies — train locally
+  pi0/  pi05/  pi0_fast/          VLAs — train on RunPod (notebooks/)
+  octo/                           JAX generalist (isolated .venv-octo)
+notebooks/
+  train_pi0_runpod.ipynb         self-contained RunPod training + eval + Hub push
+  train_pi05_runpod.ipynb
+  train_pi0_fast_runpod.ipynb
+  convert_and_push_dataset.ipynb raw HF episodes → LeRobot dataset → Hub
+docs/
+  runpod_training.md     the VLA notebooks, every knob, VRAM/speed tuning
+  quantization.md        QLoRA training + post-training inference quantization
+  inference.md           runtime/latency across all policies
+  evaluation.md          action logging + GT-vs-prediction
 eda/
   eda.ipynb              explore the dataset before training
 ```

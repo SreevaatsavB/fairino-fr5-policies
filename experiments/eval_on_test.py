@@ -99,6 +99,9 @@ def main():
     ap.add_argument("--max-steps", type=int, default=None,
                     help="cap frames per episode (default: whole episode)")
     ap.add_argument("--out", default=None, help="output dir (default: <ckpt_dir>/eval)")
+    ap.add_argument("--quantize", choices=["nf4", "int8"], default=None,
+                    help="pi-family only: post-training quantize the VLM before evaluating, to "
+                         "measure the accuracy cost of NF4/int8 vs the bf16 checkpoint")
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else
@@ -111,10 +114,18 @@ def main():
     action_space = ck.get("action_space", "joint")
     from vla_pretrained import strip_pretrained_for_checkpoint
     strip_pretrained_for_checkpoint(cfg)   # skip 6 GB base re-download (VLA policies)
+    if args.quantize:
+        cfg["model"]["quantize"] = "none"  # build unquantized; quantize AFTER load (see below)
     model = _load_policy_module(policy).build_model(cfg, ck["stats"], device)
     model.load_state_dict(ck["model_state"])
+    if args.quantize:
+        if policy not in ("pi0", "pi05", "pi0_fast"):
+            raise SystemExit(f"--quantize only applies to the pi-family VLAs, not {policy!r}")
+        from vla_pretrained import quantize_for_inference
+        quantize_for_inference(model, args.quantize, policy)
     model.eval()
-    print(f"loaded {policy}  epoch={ck.get('epoch')}  action_space={action_space}")
+    print(f"loaded {policy}  epoch={ck.get('epoch')}  action_space={action_space}"
+          f"{'  quantized ' + args.quantize if args.quantize else ''}")
 
     d, t = cfg["dataset"], cfg["training"]
     stride = d.get("frame_stride", 1)

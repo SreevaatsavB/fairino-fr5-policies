@@ -183,11 +183,26 @@ class GripperHandler:
 
 # ── main loop ─────────────────────────────────────────────────────────────────
 
+def _resolve_checkpoint(args) -> str:
+    """Return a local checkpoint path, downloading from the Hub first if --hf-repo
+    is given. Lets you deploy a checkpoint the RunPod notebook pushed without a
+    manual download step: --hf-repo <you>/fr5-pi0-lora [--hf-file best.pt]."""
+    if args.hf_repo:
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(repo_id=args.hf_repo, filename=args.hf_file)
+        print(f"[deploy] downloaded {args.hf_repo}/{args.hf_file} -> {path}")
+        return path
+    if not args.checkpoint:
+        raise SystemExit("pass --checkpoint <path> or --hf-repo <user/repo>")
+    return args.checkpoint
+
+
 def run(args):
     device = torch.device("cuda" if torch.cuda.is_available() else
                           "mps"  if torch.backends.mps.is_available() else "cpu")
     print(f"device: {device}")
 
+    args.checkpoint = _resolve_checkpoint(args)
     overrides = {}
     if args.te_coeff is not None:
         overrides["temporal_ensemble_coeff"] = (
@@ -340,7 +355,13 @@ def run(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", required=True, help="path to best.pt or epoch_XXXX.pt")
+    parser.add_argument("--checkpoint", help="path to best.pt or epoch_XXXX.pt "
+                        "(omit if using --hf-repo)")
+    parser.add_argument("--hf-repo", default=None,
+                        help="download the checkpoint from this HuggingFace model repo instead "
+                             "of a local path, e.g. <you>/fr5-pi0-lora (see notebooks' push cell)")
+    parser.add_argument("--hf-file", default="best.pt",
+                        help="file to pull from --hf-repo (default best.pt)")
     parser.add_argument("--steps",      type=int, default=150,
                         help="number of policy steps to run (default 150 = 5s at 30 Hz)")
     parser.add_argument("--no-image",   action="store_true",
