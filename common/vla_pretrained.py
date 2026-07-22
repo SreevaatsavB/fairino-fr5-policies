@@ -25,6 +25,16 @@ because peft must see Linear4bit to build lora.Linear4bit wrappers.
 
 from contextlib import contextmanager
 
+# Apply lerobot's transformers/torch compat shims as soon as this module loads —
+# every π-family wrapper imports it, and both shims are on the inference path, so
+# without this deploy.py/eval crashes on API drift after training succeeds. No-op
+# if the installed stack is already compatible. See common/lerobot_patches.py.
+try:
+    from lerobot_patches import apply_lerobot_compat_patches
+    apply_lerobot_compat_patches()
+except Exception as _e:  # never let a compat shim break the import
+    print(f"[vla_pretrained] lerobot compat patches not applied: {type(_e).__name__}: {_e}")
+
 _TORCH_DTYPES = {
     "bfloat16": "bfloat16", "bf16": "bfloat16",
     "float16":  "float16",  "fp16": "float16", "half": "float16",
