@@ -29,6 +29,11 @@ model:
   vlm_lora_rank: 16
   vlm_lora_alpha: 32
   vlm_lora_dropout: 0.05
+  # which VLM Linears get adapters — openpi LoRAs attention AND the MLP (rank 16 on
+  # both in gemma_2b_lora); QLoRA finds all-linear adapters match full finetuning.
+  # Older checkpoints (attention-only) rebuild correctly: their saved config has no
+  # key, and the code default is q/k/v/o.
+  vlm_lora_targets: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
 
   # pi0 architecture (must match PaliGemma variant)
   paligemma_variant: "gemma_2b"

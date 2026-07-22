@@ -109,6 +109,11 @@ class Pi0FastConfig:
     vlm_lora_rank:    int   = 0        # >0 -> LoRA on the VLM q/k/v/o (needed for quantize)
     vlm_lora_alpha:   int   = 32
     vlm_lora_dropout: float = 0.05
+    # which VLM Linear layers get adapters. Default = attention-only (back-compat
+    # with existing checkpoints); openpi LoRAs attention AND the MLP (gemma_2b_lora
+    # rank 16 on both), and QLoRA finds all-linear is what matches full finetuning —
+    # new runs should use ("q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj").
+    vlm_lora_targets: tuple = ("q_proj", "k_proj", "v_proj", "o_proj")
 
     # proprioception handling (see common/proprio.py): full | dropout | none
     proprio_mode:         str   = "full"
@@ -169,7 +174,8 @@ class Pi0Fast(nn.Module):
                 if "lm_head" not in n and "embed_tokens" not in n:
                     p.requires_grad_(False)
             _inject_vlm_lora(self.policy, cfg.vlm_lora_rank, cfg.vlm_lora_alpha,
-                             cfg.vlm_lora_dropout, "pi0_fast")
+                             cfg.vlm_lora_dropout, "pi0_fast",
+                             targets=cfg.vlm_lora_targets)
 
         # proprioception mode (full | dropout | none) — applied in _make_batch.
         self.proprio = ProprioConfig(cfg.proprio_mode, cfg.proprio_dropout_rate)
@@ -281,6 +287,8 @@ def build_model(cfg: dict, stats: dict, device) -> Pi0Fast:
         vlm_lora_rank=m.get("vlm_lora_rank", 0),
         vlm_lora_alpha=m.get("vlm_lora_alpha", 32),
         vlm_lora_dropout=m.get("vlm_lora_dropout", 0.05),
+        vlm_lora_targets=tuple(m.get("vlm_lora_targets",
+                                     ("q_proj", "k_proj", "v_proj", "o_proj"))),
         proprio_mode=m.get("proprio_mode", "full"),
         proprio_dropout_rate=m.get("proprio_dropout_rate", 0.3),
     )

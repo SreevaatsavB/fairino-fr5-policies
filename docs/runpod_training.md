@@ -51,15 +51,24 @@ TASK_TEXT       = "pick up the block and place it in the bin"  # fallback prompt
 
 # ---- finetuning recipe ----
 FINETUNE_MODE = "auto"   # auto | lora | full | freeze_vision | expert_only
-QUANTIZE      = "nf4"    # none | nf4 | int8  — k-bit quantization of the FROZEN VLM (QLoRA)
-LORA_RANK     = 16       # LoRA rank on the VLM q/k/v/o (lora mode)
+QUANTIZE      = "none"   # none | nf4 | int8. The official recipe is plain bf16 LoRA; NF4
+                         # (QLoRA) is the MEMORY fallback for <=24 GB cards — quality-neutral
+                         # per the QLoRA paper, but ~20-30% slower per step (dequantization)
+LORA_RANK     = 16       # LoRA rank (openpi uses 16 on the 2B VLM)
+LORA_TARGETS  = [...]    # attention q/k/v/o AND MLP gate/up/down — openpi LoRAs attn+ffn,
+                         # and QLoRA finds all-linear adapters match full-finetune quality
 LORA_ALPHA    = 32
 LORA_DROPOUT  = 0.05
 
-# ---- optimization ----
+# ---- optimization (openpi-style: budget in STEPS, warmup + cosine decay) ----
 BATCH_SIZE   = None      # None -> auto from free VRAM; set an int to override
-MAX_EPOCHS   = 100       # VLA finetuning on ~120 demos usually converges well before this
-LR           = 2.5e-5
+MAX_STEPS    = 30_000    # optimizer-step budget. This is how openpi finetunes the pi family
+                         # (30k steps at batch 32) — NOT epochs. 100 epochs here would be
+                         # ~330k steps, 11x the official budget, with no evidence of benefit.
+WARMUP_STEPS = 1_000     # linear warmup, then cosine decay to LR_MIN
+MAX_EPOCHS   = 100       # hard cap only; the run stops at MAX_STEPS first (~9-10 epochs)
+LR           = 2.5e-5    # PEAK lr (openpi: 5e-5 at batch 32-64; scaled for our smaller batch)
+LR_MIN       = 2.5e-6    # cosine floor
 WEIGHT_DECAY = 0.01
 GRAD_CLIP    = 1.0
 CHUNK_SIZE   = 50        # action horizon (1.67 s @ 30 Hz)
@@ -134,8 +143,11 @@ The step-timing cell (9) prints the real footprint, e.g.
 - **If the GPU sits at 0 % util between steps** it is starved for data. Relaunch the
   pod with `--shm-size 16g` and set `NUM_WORKERS = 4`. This is usually the single
   biggest speedup and it does not touch quality.
-- **Cut epochs:** `MAX_EPOCHS = 40` is usually plenty on ~120 demos; watch val loss
-  and stop when it flattens.
+- **The budget is steps, not epochs.** openpi's official finetune configs run
+  **30k optimizer steps** (batch 32) with warmup + cosine decay — that's the whole
+  recipe, and it lands around 9-10 epochs here. `MAX_STEPS` enforces it; watch val
+  loss and stop earlier if it flattens. Training "100 epochs" (~330k steps) is 11x
+  the recipe for no established benefit and is where multi-day ETAs come from.
 - For a big batch (≥ ~5× the default) nudge `LR` up toward `5e-5`.
 
 ---

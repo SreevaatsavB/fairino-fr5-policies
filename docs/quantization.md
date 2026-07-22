@@ -53,6 +53,14 @@ code refuses it.
 
 ## 2. QLoRA training (the notebooks)
 
+**When to use it:** only when VRAM forces you. The official openpi finetune recipe
+is plain **bf16 LoRA — no quantization** (30k steps, batch 32, LoRA rank 16 on the
+VLM's attention *and* MLP). NF4 matches 16-bit quality (the QLoRA result) but pays
+~20-30% per-step slowdown for dequantization — so on a 40 GB+ card, bf16 LoRA is
+both faster and the recipe the base model was tuned by; NF4 earns its keep on
+<=24 GB cards where bf16 LoRA doesn't fit. The notebooks default to
+`QUANTIZE="none"` accordingly.
+
 Set in the parameters cell:
 
 ```python
@@ -159,8 +167,9 @@ the robot and use NF4 only where memory forces it.
 
 | I want to… | do this |
 |---|---|
-| train π0.5 on a 24–48 GB pod | `QUANTIZE="nf4"`, `FINETUNE_MODE="auto"` (→ lora) |
-| train unquantized on 80 GB | `QUANTIZE="none"`, `FINETUNE_MODE="full"` or `lora` |
+| train on a 40 GB+ pod | `QUANTIZE="none"` — bf16 LoRA, the official openpi recipe (faster too) |
+| train on a ≤24 GB pod | `QUANTIZE="nf4"`, `FINETUNE_MODE="auto"` (→ lora) |
+| full finetune on 80 GB | `QUANTIZE="none"`, `FINETUNE_MODE="full"` |
 | deploy a bf16 checkpoint on a big GPU | `deploy.py --checkpoint best.pt` (no `--quantize`) |
 | deploy on a small robot GPU | `deploy.py --hf-repo <repo> --quantize nf4` |
 | check the accuracy cost of NF4 | eval bf16 vs NF4 MAE (§5) |

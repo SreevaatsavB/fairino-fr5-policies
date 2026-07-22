@@ -114,6 +114,11 @@ class Pi0Config:
     vlm_lora_rank:    int   = 16
     vlm_lora_alpha:   int   = 32
     vlm_lora_dropout: float = 0.05
+    # which VLM Linear layers get adapters. Default = attention-only (back-compat
+    # with existing checkpoints); openpi LoRAs attention AND the MLP (gemma_2b_lora
+    # rank 16 on both), and QLoRA finds all-linear is what matches full finetuning —
+    # new runs should use ("q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj").
+    vlm_lora_targets: tuple = ("q_proj", "k_proj", "v_proj", "o_proj")
 
     # memory / VRAM knobs (threaded to lerobot's PI0Config; see notebooks/):
     #   dtype                   "bfloat16" halves weights+activations vs "float32"
@@ -191,7 +196,8 @@ class Pi0(nn.Module):
                      lora_rank=cfg.vlm_lora_rank, expert_only=cfg.train_expert_only)
         if cfg.vlm_lora_rank > 0:
             _inject_vlm_lora(self.policy, cfg.vlm_lora_rank, cfg.vlm_lora_alpha,
-                             cfg.vlm_lora_dropout, "pi0")
+                             cfg.vlm_lora_dropout, "pi0",
+                             targets=cfg.vlm_lora_targets)
 
         # proprioception mode (full | dropout | none) — applied in _make_batch.
         # pi0 always has language conditioning, so 'none' is valid with or without image.
@@ -329,6 +335,8 @@ def build_model(cfg: dict, stats: dict, device) -> Pi0:
         vlm_lora_rank=m.get("vlm_lora_rank", 16),
         vlm_lora_alpha=m.get("vlm_lora_alpha", 32),
         vlm_lora_dropout=m.get("vlm_lora_dropout", 0.05),
+        vlm_lora_targets=tuple(m.get("vlm_lora_targets",
+                                     ("q_proj", "k_proj", "v_proj", "o_proj"))),
         dtype=m.get("dtype", "bfloat16"),
         gradient_checkpointing=m.get("gradient_checkpointing", True),
         freeze_vision_encoder=m.get("freeze_vision_encoder", False),

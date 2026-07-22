@@ -303,7 +303,8 @@ def _load_pretrained_weights(policy, repo_id: str, tag: str):
             f"{sorted(missing)[:5]}")
 
 
-def _inject_vlm_lora(policy, rank: int, alpha: int, dropout: float, tag: str):
+def _inject_vlm_lora(policy, rank: int, alpha: int, dropout: float, tag: str,
+                     targets=None):
     """LoRA adapters on the (frozen) VLM's attention projections, in place.
 
     peft's inject_adapter_in_model mutates the Linear layers without wrapping or
@@ -314,8 +315,11 @@ def _inject_vlm_lora(policy, rank: int, alpha: int, dropout: float, tag: str):
     vlm = policy.model.paligemma_with_expert.paligemma
     inject_adapter_in_model(
         LoraConfig(r=rank, lora_alpha=alpha, lora_dropout=dropout,
-                   target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+                   # default = attention-only (back-compat with older checkpoints).
+                   # openpi LoRAs attention AND ffn; pass all-linear targets for that.
+                   target_modules=list(targets or ("q_proj", "k_proj", "v_proj", "o_proj")),
                    bias="none"),
+
         vlm)
     n_lora = 0
     for n, p in policy.named_parameters():

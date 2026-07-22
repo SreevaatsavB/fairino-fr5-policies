@@ -51,6 +51,8 @@ model:
   vlm_lora_rank: 0        # >0 -> LoRA on the VLM q/k/v/o + frozen base (required by quantize)
   vlm_lora_alpha: 32
   vlm_lora_dropout: 0.05
+  # if LoRA is enabled, adapt attention AND MLP (openpi/QLoRA recipe):
+  vlm_lora_targets: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
 
   # proprioception handling — benchmark axis (see docs/proprioception_modes.md)
   #   full | dropout | none   (override: python common/train.py --policy pi0_fast --proprio none)
