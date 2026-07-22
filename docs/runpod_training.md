@@ -9,7 +9,7 @@ repo's `common/deploy.py`** so you can pull a trained model straight onto the FR
 
 | notebook | model | recipe |
 |---|---|---|
-| `notebooks/train_pi0_runpod.ipynb` | π0 | flow-matching VLA, QLoRA on the VLM + full action expert |
+| `notebooks/train_pi0_runpod.ipynb` | π0 | flow-matching VLA, bf16 LoRA (attn+MLP) on the VLM + full action expert (NF4 optional) |
 | `notebooks/train_pi05_runpod.ipynb` | π0.5 | π0 with a longer language context (tokenizer_max_length=200) |
 | `notebooks/train_pi0_fast_runpod.ipynb` | π0-FAST | autoregressive FAST tokens; full-finetune by default |
 | `notebooks/convert_and_push_dataset.ipynb` | — | raw HF episodes → LeRobot dataset → push to the Hub |
@@ -78,8 +78,9 @@ CHUNK_SIZE   = 50        # action horizon (1.67 s @ 30 Hz)
 # ---- data / throughput ----
 FRAME_STRIDE = 5         # sample every Kth frame as a chunk START (cuts redundant 30 fps
                          # samples; the chunk itself stays full-rate)
-GRAD_CKPT    = True      # gradient checkpointing. With NF4 you have VRAM to spare -> set
-                         # False for ~20-30% faster steps (uses more memory)
+GRAD_CKPT    = True      # gradient checkpointing. On a 40 GB+ card the LoRA run usually
+                         # fits without it -> set False for ~20-30% faster steps; back to
+                         # True if the step-timing cell OOMs
 NUM_WORKERS  = 0         # DataLoader workers. 0 is safe on a small /dev/shm; set 4-8 only if
                          # you launched the pod with --shm-size 16g (biggest speedup if the
                          # GPU sits idle between steps)
@@ -98,7 +99,7 @@ RESUME     = "auto"      # "auto" -> continue from CKPT_DIR/last.pt if present; 
 
 | mode | VLM | action expert | when |
 |---|---|---|---|
-| `lora` | frozen + LoRA adapters on q/k/v/o | fully trained | **default** on ≥40 GB (or any card with NF4) |
+| `lora` | frozen + LoRA adapters on attention **and** MLP (`LORA_TARGETS`) | fully trained | **default** on ≥40 GB (or any card with NF4) |
 | `expert_only` | fully frozen | fully trained | the 24 GB option; least overfitting on few demos |
 | `freeze_vision` | SigLIP frozen, rest trained | fully trained | middle ground |
 | `full` | fully trained | fully trained | 80 GB, most capacity, most overfitting risk |
