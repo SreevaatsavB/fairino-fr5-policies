@@ -13,6 +13,9 @@ There are **two distinct uses**, in opposite orders:
 
 Getting the order right is the whole trick, and it differs between the two — see §4.
 
+For the full dtype picture around this (bf16 vs fp32 vs 4-bit, training and
+inference), see [`precision.md`](precision.md).
+
 ---
 
 ## 1. What NF4 / int8 actually do

@@ -10,6 +10,10 @@ plain-English deep dives on each policy in this repo — what it is, how it work
 > inference quantization (`deploy.py --quantize nf4`), what's/isn't quantized, and the
 > Turing+ requirement, in [`quantization.md`](quantization.md).
 >
+> **precision** — the exact dtype map (what runs bf16, what deliberately stays fp32,
+> why never fp16, and the NF4 storage-vs-compute distinction), in
+> [`precision.md`](precision.md).
+>
 > **how they differ at deployment** — query cadence, temporal ensembling, action queues, the
 > 30 Hz budget, per-model latency, and loading checkpoints (local / `--hf-repo` / `--quantize`)
 > are compared in one place in [`inference.md`](inference.md).
