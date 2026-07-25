@@ -190,9 +190,12 @@ def _load_episode(ep_dir: Path, max_frames: int | None, action_space: str = "joi
     if meta_path.exists():
         m = json.loads(meta_path.read_text())
         task = m.get("language_instruction") or m.get("instruction") or task
-    # single-task benchmark: color is irrelevant, the target is always the green
-    # bowl, so collapse every per-colour instruction to ONE task string -> one
-    # task_index across the whole dataset.
+    # Per-episode instructions from meta.json flow through UNCHANGED — each unique
+    # string gets its own task_index, which is what makes the dataset genuinely
+    # language-conditioned (the 2026-07 raw set carries 400 unique phrasings over
+    # 9 canonical tasks). --task collapses everything to ONE string; that is only
+    # for single-task smoke tests and destroys the language signal — never use it
+    # on the multi-task data.
     if task_override is not None:
         task = task_override
 
