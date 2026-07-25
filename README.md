@@ -166,7 +166,8 @@ notebooks/
   train_pi0_runpod.ipynb         self-contained RunPod training + eval + Hub push
   train_pi05_runpod.ipynb
   train_pi0_fast_runpod.ipynb
-  convert_and_push_dataset.ipynb raw HF episodes → LeRobot dataset → Hub
+  convert_and_push_dataset_v2.ipynb  400-ep multi-task set → LeRobot → Hub (videos-only)
+  convert_and_push_dataset.ipynb     v1 (134-ep single-task), kept for reproducibility
 docs/
   runpod_training.md     the VLA notebooks, every knob, VRAM/speed tuning
   quantization.md        QLoRA training + post-training inference quantization

@@ -12,7 +12,8 @@ repo's `common/deploy.py`** so you can pull a trained model straight onto the FR
 | `notebooks/train_pi0_runpod.ipynb` | π0 | flow-matching VLA, bf16 LoRA (attn+MLP) on the VLM + full action expert (NF4 optional) |
 | `notebooks/train_pi05_runpod.ipynb` | π0.5 | π0 with a longer language context (tokenizer_max_length=200) |
 | `notebooks/train_pi0_fast_runpod.ipynb` | π0-FAST | autoregressive FAST tokens; full-finetune by default |
-| `notebooks/convert_and_push_dataset.ipynb` | — | raw HF episodes → LeRobot dataset → push to the Hub |
+| `notebooks/convert_and_push_dataset_v2.ipynb` | — | **use this one** — 400-episode multi-task set → LeRobot → Hub (videos-only; training pods extract frames locally) |
+| `notebooks/convert_and_push_dataset.ipynb` | — | v1 (134-episode single-task set) — kept for reproducibility |
 
 > **New to why these need quantization / LoRA?** Read
 > [`quantization.md`](quantization.md) first — this doc references those knobs
@@ -34,10 +35,12 @@ repo's `common/deploy.py`** so you can pull a trained model straight onto the FR
    The tokenizer is gated there; the actual weights come from `lerobot/pi05_base`
    etc. Set it as a pod secret / env var `HF_TOKEN`, or the notebook prompts for
    it (masked). **Never hardcode it** — it is read from `os.environ` or `getpass`.
-3. **The dataset on the Hub, in LeRobot v3 format.** If your recordings are raw
-   `episode_XXXX/` folders, run `convert_and_push_dataset.ipynb` first, then set
-   `HF_DATASET_REPO` to its output repo. The training notebook auto-converts if
-   you point it at raw episodes, but pushing a converted dataset once is faster.
+3. **The dataset on the Hub, in LeRobot v3 format.** Run
+   `convert_and_push_dataset_v2.ipynb` (cheap CPU pod is fine), then set
+   `HF_DATASET_REPO` to its output repo. The Hub copy ships **videos only**;
+   the training notebook rebuilds `frames/` locally on first run (one-time,
+   ~10–30 min — you'll see `extracting frames ...` in the dataset cell). It also
+   still auto-converts if pointed at raw episodes.
 
 ---
 
