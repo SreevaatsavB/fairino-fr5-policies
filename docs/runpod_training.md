@@ -87,7 +87,8 @@ GRAD_CKPT    = True      # gradient checkpointing. On a 40 GB+ card the LoRA run
 NUM_WORKERS  = 0         # DataLoader workers. 0 is safe on a small /dev/shm; set 4-8 only if
                          # you launched the pod with --shm-size 16g (biggest speedup if the
                          # GPU sits idle between steps)
-VAL_FRAC     = 0.1
+VAL_FRAC     = 0.05      # stratified over canonical tasks when available (~2 val eps
+                         # per task); val loss is a weak BC signal — real eval is rollouts
 AUG_LEVEL    = "crops"   # none | crops
 PROPRIO_MODE = "full"    # full | dropout | none  (benchmark axis, see proprioception_modes.md)
 
