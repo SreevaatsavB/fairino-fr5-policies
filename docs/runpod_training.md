@@ -14,6 +14,7 @@ repo's `common/deploy.py`** so you can pull a trained model straight onto the FR
 | `notebooks/train_pi0_fast_runpod.ipynb` | π0-FAST | autoregressive FAST tokens; full-finetune by default |
 | `notebooks/convert_and_push_dataset_v2.ipynb` | — | **use this one** — 400-episode multi-task set → LeRobot → Hub (videos-only; training pods extract frames locally) |
 | `notebooks/convert_and_push_dataset.ipynb` | — | v1 (134-episode single-task set) — kept for reproducibility |
+| `notebooks/push_checkpoint_hub.ipynb` | — | standalone: validate a trained checkpoint and push it to a versioned Hub repo with an auto-generated model card |
 
 > **New to why these need quantization / LoRA?** Read
 > [`quantization.md`](quantization.md) first — this doc references those knobs
