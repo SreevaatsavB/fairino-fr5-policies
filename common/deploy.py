@@ -52,8 +52,14 @@ def _load_policy_module(policy: str):
 
 POLICY_HZ           = 30
 POLICY_PERIOD       = 1.0 / POLICY_HZ
-GRIPPER_OPEN_THRESH  = 0.65
-GRIPPER_CLOSE_THRESH = 0.35
+# Gripper convention, MEASURED from the training data (Slifold raw episodes:
+# gripper_cmd is 0.0 with the gripper physically open at episode start/end and
+# 1.0 during every grasp-hold segment): 1.0 = CLOSED, 0.0 = OPEN.
+# The policy's gripper channel is therefore commanded CLOSE when high and OPEN
+# when low. (Before 2026-07 this file had the mapping inverted — a high output
+# opened the gripper — so no policy trained on this data could ever grasp.)
+GRIPPER_CLOSE_THRESH = 0.65   # channel >= this -> close
+GRIPPER_OPEN_THRESH  = 0.35   # channel <= this -> open
 
 _IMG_TRANSFORM = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -151,10 +157,11 @@ class GripperHandler:
         self._state = None   # "open" | "closed" | None
 
     def update(self, gripper_norm: float):
-        if gripper_norm >= GRIPPER_OPEN_THRESH and self._state != "open":
-            self._send("open", GRIPPER_OPEN_PCT)
-        elif gripper_norm <= GRIPPER_CLOSE_THRESH and self._state != "closed":
+        # dataset convention: 1 = closed, 0 = open (see thresholds above)
+        if gripper_norm >= GRIPPER_CLOSE_THRESH and self._state != "closed":
             self._send("closed", GRIPPER_CLOSE_PCT)
+        elif gripper_norm <= GRIPPER_OPEN_THRESH and self._state != "open":
+            self._send("open", GRIPPER_OPEN_PCT)
 
     def _send(self, label: str, pct: int):
         self._robot.stop_servo_mode()
@@ -214,6 +221,26 @@ def run(args):
         args.checkpoint, device, overrides, inference_quantize=args.quantize)
     use_image = cfg_dict["dataset"]["use_image"] and not args.no_image
 
+    # Cameras the checkpoint was TRAINED on. The v2 pi-family checkpoints use two
+    # (wrist_cam = wrist-mounted first-person, scene_cam = fixed overview) and the
+    # wrapper hard-requires every key. This rig currently captures ONE camera, so:
+    #   - multi-camera checkpoint + no flag  -> refuse loudly (silently feeding one
+    #     view into both slots is exactly the corruption that sank the 2026-07-26
+    #     rollout: the wrist slot got a scene image, and grasping never fired);
+    #   - --allow-single-camera              -> duplicate the frame into every slot,
+    #     clearly labeled DEGRADED — for pipeline debugging only, not evaluation.
+    cam_names = list(cfg_dict["dataset"].get("camera_names", ["wrist_cam"]))
+    image_keys = [f"observation.images.{c}" for c in cam_names]
+    if use_image and len(cam_names) > 1 and not args.allow_single_camera:
+        raise SystemExit(
+            f"checkpoint was trained on {len(cam_names)} cameras {cam_names}, but this "
+            f"deploy rig captures one. Feeding one view into all slots corrupts the "
+            f"wrist channel and cripples grasping. Either wire up both cameras, or "
+            f"re-run with --allow-single-camera to accept DEGRADED single-view input.")
+    if use_image and len(cam_names) > 1:
+        print(f"[deploy] WARNING: DEGRADED MODE — duplicating one camera into "
+              f"{image_keys} (wrist slot is out-of-distribution)")
+
     # Record every predicted action over the rollout (shared schema with the offline
     # eval). Saved on exit — including Ctrl-C — so a rollout is never lost. Plot with
     # tools/plot_actions.py. There is no ground truth on the robot, so this is the
@@ -265,7 +292,7 @@ def run(args):
             step       = 0
             t_last_log = time.monotonic()
             last_img   = None   # holds last valid frame to avoid None on drops
-            last_gripper_cmd = 1.0   # 7th state dim = current gripper opening; assume open at start
+            last_gripper_cmd = 0.0   # 7th state dim; gripper starts OPEN = 0.0 (1 = closed)
 
             while step < args.steps:
                 t0 = time.monotonic()
@@ -284,7 +311,10 @@ def run(args):
                 if camera is not None:
                     bgr = camera.latest_bgr()
                     if bgr is not None:
-                        img = frame_to_tensor(bgr, device).unsqueeze(0)
+                        t_img = frame_to_tensor(bgr, device).unsqueeze(0)
+                        # dict keyed per trained camera — the pi-family wrappers require
+                        # every key present (a bare tensor only fills the first slot)
+                        img = {k: t_img for k in image_keys}
                         last_img = img
 
                 # ── policy ───────────────────────────────────────────────────
@@ -379,6 +409,10 @@ def main():
                         help="inference-only override: receding horizon — execute the first "
                              "k actions of each chunk then re-plan (used when ensembling is "
                              "off; dit_flow)")
+    parser.add_argument("--allow-single-camera", action="store_true",
+                        help="deploy a multi-camera checkpoint with this rig's single camera "
+                             "by duplicating the frame into every camera slot. DEGRADED: the "
+                             "wrist slot receives an out-of-distribution view — debugging only")
     parser.add_argument("--quantize", choices=["nf4", "int8"], default=None,
                         help="pi-family only: post-training quantization of the VLM for "
                              "low-VRAM inference. Works on a checkpoint trained WITHOUT "
