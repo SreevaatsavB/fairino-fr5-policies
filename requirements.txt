@@ -26,6 +26,10 @@ lerobot==0.5.1
 # LoRA adapters for the pi0/pi05 VLM (see common/vla_pretrained.py)
 peft>=0.17
 
+# OPTIONAL: NF4/int8 quantized inference (deploy.py --quantize nf4) — CUDA-only,
+# needs a Turing-or-newer GPU. Uncomment on the robot box if you deploy quantized.
+# bitsandbytes>=0.43
+
 # scipy — required by pi0_fast's FAST action tokenizer (lerobot/fast-action-tokenizer);
 # PI0FastPolicy() fails to construct without it.
 scipy>=1.11
