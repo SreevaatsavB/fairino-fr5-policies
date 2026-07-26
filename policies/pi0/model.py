@@ -139,6 +139,10 @@ class Pi0Config:
     quantize: str = "none"
 
     # proprioception handling (see common/proprio.py): full | dropout | none
+    # format v3: append PaliGemma's prefix terminator '\n' + openpi text cleanup.
+    # Read from the checkpoint config so deploy reproduces the training format;
+    # False keeps pre-v3 checkpoints byte-compatible.
+    prompt_newline:       bool  = False
     proprio_mode:         str   = "full"
     proprio_dropout_rate: float = 0.3
 
@@ -208,7 +212,7 @@ class Pi0(nn.Module):
         # load tokenizer (requires HF auth + PaliGemma licence)
         if _HAS_TOKENIZER:
             try:
-                self.tokenizer = AutoTokenizer.from_pretrained(_PALIGEMMA_TOKENIZER)
+                self.tokenizer = AutoTokenizer.from_pretrained(_PALIGEMMA_TOKENIZER, padding_side="right")
             except Exception:
                 self.tokenizer = None   # will use zero tokens — smoke test only
         else:
@@ -241,6 +245,9 @@ class Pi0(nn.Module):
             return ids, mask
         if isinstance(task, str):
             task = [task]
+        if getattr(self.cfg, "prompt_newline", False):   # format v3 (openpi convention)
+            task = [t.strip().replace("_", " ") for t in task]
+            task = [t if t.endswith("\n") else t + "\n" for t in task]
         enc = self.tokenizer(task, return_tensors="pt", padding="max_length",
                              truncation=True, max_length=self.cfg.tokenizer_max_length)
         return enc["input_ids"].to(device), enc["attention_mask"].to(device)
@@ -342,6 +349,7 @@ def build_model(cfg: dict, stats: dict, device) -> Pi0:
         freeze_vision_encoder=m.get("freeze_vision_encoder", False),
         train_expert_only=m.get("train_expert_only", False),
         quantize=m.get("quantize", "none") or "none",
+        prompt_newline=m.get("prompt_newline", False),
         proprio_mode=m.get("proprio_mode", "full"),
         proprio_dropout_rate=m.get("proprio_dropout_rate", 0.3),
     )

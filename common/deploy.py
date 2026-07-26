@@ -61,11 +61,29 @@ POLICY_PERIOD       = 1.0 / POLICY_HZ
 GRIPPER_CLOSE_THRESH = 0.65   # channel >= this -> close
 GRIPPER_OPEN_THRESH  = 0.35   # channel <= this -> open
 
-_IMG_TRANSFORM = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                         std=[0.229, 0.224, 0.225]),
-])
+class _ResizeWithPad:
+    """Aspect-preserving resize + letterbox (openpi/lerobot resize_with_pad).
+    Format-v3 checkpoints train on this; pre-v3 checkpoints trained on the plain
+    squash-resize — the checkpoint's pad_resize flag selects which one deploy uses,
+    keeping inference in lockstep with how each checkpoint was trained."""
+    def __init__(self, h, w):
+        self.h, self.w = h, w
+    def __call__(self, img):
+        import torch.nn.functional as F
+        c, ih, iw = img.shape
+        sc = min(self.h / ih, self.w / iw)
+        nh, nw = max(1, round(ih * sc)), max(1, round(iw * sc))
+        img = F.interpolate(img.unsqueeze(0), size=(nh, nw),
+                            mode="bilinear", align_corners=False).squeeze(0)
+        out = img.new_zeros(c, self.h, self.w)
+        t, l = (self.h - nh) // 2, (self.w - nw) // 2
+        out[:, t:t + nh, l:l + nw] = img
+        return out
+
+
+_NORM = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+_IMG_TRANSFORM     = transforms.Compose([transforms.Resize((224, 224)), _NORM])  # pre-v3
+_IMG_TRANSFORM_PAD = transforms.Compose([_ResizeWithPad(224, 224), _NORM])       # format v3
 
 
 # ── model ─────────────────────────────────────────────────────────────────────
@@ -143,10 +161,11 @@ class LiveCamera:
         self._cam.stop()
 
 
-def frame_to_tensor(bgr: np.ndarray, device: torch.device) -> torch.Tensor:
+def frame_to_tensor(bgr: np.ndarray, device: torch.device,
+                    pad_resize: bool = False) -> torch.Tensor:
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     t   = torch.from_numpy(rgb).permute(2, 0, 1).float() / 255.0
-    return _IMG_TRANSFORM(t).to(device)
+    return (_IMG_TRANSFORM_PAD if pad_resize else _IMG_TRANSFORM)(t).to(device)
 
 
 # ── gripper ───────────────────────────────────────────────────────────────────
@@ -220,6 +239,9 @@ def run(args):
     model, cfg_dict, action_space, policy = load_policy(
         args.checkpoint, device, overrides, inference_quantize=args.quantize)
     use_image = cfg_dict["dataset"]["use_image"] and not args.no_image
+    pad_resize = bool(cfg_dict["model"].get("pad_resize", False))
+    if pad_resize:
+        print("[deploy] format v3 checkpoint: aspect-preserving pad-resize active")
 
     # Cameras the checkpoint was TRAINED on. The v2 pi-family checkpoints use two
     # (wrist_cam = wrist-mounted first-person, scene_cam = fixed overview) and the
@@ -311,7 +333,7 @@ def run(args):
                 if camera is not None:
                     bgr = camera.latest_bgr()
                     if bgr is not None:
-                        t_img = frame_to_tensor(bgr, device).unsqueeze(0)
+                        t_img = frame_to_tensor(bgr, device, pad_resize).unsqueeze(0)
                         # dict keyed per trained camera — the pi-family wrappers require
                         # every key present (a bare tensor only fills the first slot)
                         img = {k: t_img for k in image_keys}
