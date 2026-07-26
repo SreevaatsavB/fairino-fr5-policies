@@ -71,10 +71,10 @@ class _ResizeWithPad:
     def __call__(self, img):
         import torch.nn.functional as F
         c, ih, iw = img.shape
-        sc = min(self.h / ih, self.w / iw)
-        nh, nw = max(1, round(ih * sc)), max(1, round(iw * sc))
-        img = F.interpolate(img.unsqueeze(0), size=(nh, nw),
-                            mode="bilinear", align_corners=False).squeeze(0)
+        ratio = max(iw / self.w, ih / self.h)      # lerobot/openpi exact formula
+        nh, nw = int(ih / ratio), int(iw / ratio)
+        img = F.interpolate(img.unsqueeze(0), size=(nh, nw), mode="bilinear",
+                            align_corners=False).squeeze(0).clamp(0.0, 1.0)
         out = img.new_zeros(c, self.h, self.w)
         t, l = (self.h - nh) // 2, (self.w - nw) // 2
         out[:, t:t + nh, l:l + nw] = img
