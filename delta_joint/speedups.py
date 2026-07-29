@@ -1,0 +1,132 @@
+"""
+The four things the pi0 benchmark run left on the table, as testable helpers so
+the notebook stays thin. Each one is independently useful; none touches common/.
+
+  enable_compile     lerobot exposes compile_model (configuration_pi0.py:82) and
+                     really calls torch.compile (modeling_pi0.py:590-594), but our
+                     _lerobot_config() never passes it. Typically 1.3-1.8x.
+  full_lora_targets  our target list uses Gemma's layer names throughout, so
+                     SigLIP only gets q/k/v — verified: 18*7 + 27*3 = 207, exactly
+                     the "merged 207 LoRA pairs" in the deploy gate log. SigLIP's
+                     out_proj and its whole MLP were never adapted.
+  warmup_cosine      common/train.py builds a bare AdamW with NO scheduler. The
+                     warmup+cosine the 30k run used lives only in the notebook.
+  init_from          warm-start weights WITHOUT the stats buffers. model.py
+                     registers action_mean/action_std as buffers, so a plain
+                     load_state_dict silently restores the old ABSOLUTE stats over
+                     fresh delta ones and cancels the entire SNR gain.
+"""
+
+import math
+
+import torch
+
+# openpi's reference pairing: lr 2.5e-5 at batch 32 (config.py). LeRobot does no
+# LR auto-scaling, so scale it here when the batch changes.
+OPENPI_LR, OPENPI_BATCH = 2.5e-5, 32
+
+# stats live in the state_dict as buffers; these must never be warm-started
+STATS_BUFFERS = ("action_mean", "action_std")
+
+# SigLIP names its projections out_proj/fc1/fc2; Gemma uses o_proj/gate/up/down.
+# A list written for one leaves the other partly unadapted.
+FULL_LORA_TARGETS = ("q_proj", "k_proj", "v_proj", "o_proj",        # attention (both)
+                     "gate_proj", "up_proj", "down_proj",           # Gemma MLP
+                     "out_proj", "fc1", "fc2")                      # SigLIP attn-out + MLP
+
+
+def scaled_lr(batch_size, base_lr=OPENPI_LR, base_batch=OPENPI_BATCH):
+    """sqrt scaling off openpi's reference. sqrt (not linear) is what the probe
+    docs and LeRobot's multi-GPU guidance recommend when the schedule is unchanged."""
+    return base_lr * math.sqrt(batch_size / base_batch)
+
+
+def enable_compile(policy_mod, mode="default"):
+    """Turn on torch.compile for a policies/<name>/model.py module.
+
+    Wraps _lerobot_config so the flag lands on the config object before
+    PI0Policy() reads it in __init__ — setting it afterwards is too late.
+    mode='default' not 'max-autotune' (lerobot's default): max-autotune's Triton
+    GEMM autotune is the one that had to be backed out on sm_100. Safe to try
+    max-autotune on A100/sm_80 once a default-mode run is known good.
+    """
+    original = policy_mod._lerobot_config
+
+    def with_compile(cfg):
+        lr_cfg = original(cfg)
+        lr_cfg.compile_model, lr_cfg.compile_mode = True, mode
+        return lr_cfg
+
+    policy_mod._lerobot_config = with_compile
+    return policy_mod
+
+
+def warmup_cosine(optimizer, total_steps, warmup_steps=1000, floor_ratio=0.1):
+    """openpi / lerobot pi0 schedule: linear warmup then cosine decay.
+
+    floor_ratio keeps a non-zero LR at the end (cosine to exactly 0 wastes the
+    tail). Returns a LambdaLR — call .step() once per OPTIMIZER step, not epoch.
+    """
+    warmup_steps = max(1, min(warmup_steps, total_steps))
+
+    def factor(step):
+        if step < warmup_steps:
+            return (step + 1) / warmup_steps
+        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        progress = min(1.0, progress)
+        return floor_ratio + (1 - floor_ratio) * 0.5 * (1 + math.cos(math.pi * progress))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
+
+
+def init_from(model, ckpt_path, device="cpu", drop=STATS_BUFFERS):
+    """Warm-start WEIGHTS from a checkpoint, keeping the model's own stats buffers.
+
+    Why this exists: policies/pi0/model.py registers action_mean / action_std with
+    register_buffer, and load_state_dict copies buffers. Warm-starting an absolute
+    checkpoint into a delta run would restore the absolute stats (std ~13 deg) over
+    the delta ones (std ~2.6 deg) — targets collapse to 0.12 of a unit and the 5x
+    gain is exactly cancelled, silently, with the loss still going down.
+
+    Optimizer state is deliberately NOT restored: Adam's moments are calibrated to
+    the old target scale.
+    """
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    sd = {k: v for k, v in ckpt["model_state"].items() if k not in drop}
+    missing, unexpected = model.load_state_dict(sd, strict=False)
+    kept = [k for k in drop if k in ckpt["model_state"]]
+    missing = [k for k in missing if k not in drop]      # ours on purpose
+    print(f"[init_from] {ckpt_path}  epoch={ckpt.get('epoch')} "
+          f"action_space={ckpt.get('action_space')!r}")
+    print(f"[init_from] kept THIS run's stats, dropped {kept} from the checkpoint")
+    if missing or unexpected:
+        print(f"[init_from] missing={len(missing)} unexpected={len(unexpected)}")
+        for k in (missing + unexpected)[:5]:
+            print(f"    {k}")
+    return model
+
+
+def loader_kwargs(num_workers=8, prefetch_factor=4):
+    """DataLoader settings for a network-volume pod. common/train.py hardcodes
+    num_workers=2 with no prefetch — the notebook measured 9.2 s/step starved vs
+    ~4.7 s/step compute-bound, i.e. the GPU spends half its life waiting on JPEGs."""
+    kw = dict(num_workers=num_workers, pin_memory=True)
+    if num_workers > 0:
+        kw.update(persistent_workers=True, prefetch_factor=prefetch_factor)
+    return kw
+
+
+def probe_input_bound(loader, n=20):
+    """Is the run data-bound or compute-bound? Decides whether a bigger batch will
+    help at all. Returns seconds per batch spent purely fetching data."""
+    import time
+    it = iter(loader)
+    next(it)                                    # let the workers spin up
+    t0 = time.perf_counter()
+    for _ in range(n):
+        next(it)
+    per_batch = (time.perf_counter() - t0) / n
+    print(f"[probe] dataloader alone: {per_batch:.3f} s/batch over {n} batches")
+    print("[probe] compare against your s/step: if it is a large fraction, raise "
+          "num_workers before touching batch size")
+    return per_batch
