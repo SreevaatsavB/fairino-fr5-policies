@@ -106,12 +106,44 @@ def init_from(model, ckpt_path, device="cpu", drop=STATS_BUFFERS):
     return model
 
 
+def use_file_system_sharing():
+    """Route DataLoader worker tensors through files instead of /dev/shm.
+
+    RunPod (and Docker generally) often caps /dev/shm at 64 MB. Eight workers at
+    prefetch 4, batch 32, two 224x224 cameras is ~1.2 GB of in-flight tensors, so
+    the default "file_descriptor" strategy exhausts shm and every worker dies at
+    once — surfacing as
+
+        RuntimeError: DataLoader worker (pid(s) ...) exited unexpectedly
+
+    typically at an epoch boundary, where persistent_workers re-enters _reset.
+    "file_system" is safe at any shm size. Process-global and idempotent.
+    """
+    import torch
+    torch.multiprocessing.set_sharing_strategy("file_system")
+
+
+def shm_size_mb():
+    """Size of /dev/shm in MB, or None off Linux. Purely informational."""
+    import shutil
+    try:
+        return shutil.disk_usage("/dev/shm").total / 1e6
+    except (FileNotFoundError, OSError):
+        return None
+
+
 def loader_kwargs(num_workers=8, prefetch_factor=4):
     """DataLoader settings for a network-volume pod. common/train.py hardcodes
     num_workers=2 with no prefetch — the notebook measured 9.2 s/step starved vs
-    ~4.7 s/step compute-bound, i.e. the GPU spends half its life waiting on JPEGs."""
+    ~4.7 s/step compute-bound, i.e. the GPU spends half its life waiting on JPEGs.
+
+    Sets file_system sharing as a side effect when workers are used: it is a
+    process-global that every caller here wants, and forgetting it costs a dead run
+    hours in. NUM_WORKERS=0 is the bulletproof fallback if workers still die.
+    """
     kw = dict(num_workers=num_workers, pin_memory=True)
     if num_workers > 0:
+        use_file_system_sharing()
         kw.update(persistent_workers=True, prefetch_factor=prefetch_factor)
     return kw
 

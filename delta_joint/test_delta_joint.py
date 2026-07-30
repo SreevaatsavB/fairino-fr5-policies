@@ -409,6 +409,30 @@ def test_gate_verdict():
     print("  gate fails the 30k numbers, passes a working policy, tolerates NaN gt")
 
 
+def test_loader_uses_file_system_sharing():
+    """The bug that killed a pod run at the second epoch: RunPod caps /dev/shm at
+    64 MB, 8 workers x prefetch 4 x batch 32 x 2 cameras is ~1.2 GB in flight, and
+    the Linux default 'file_descriptor' strategy exhausts it — all workers die with
+    'DataLoader worker (pid(s) ...) exited unexpectedly'.
+
+    NOTE macOS only supports file_system, so the transition cannot be observed
+    here; this asserts the END STATE, which is what protects the run on Linux.
+    """
+    from speedups import loader_kwargs, use_file_system_sharing, shm_size_mb
+    use_file_system_sharing()
+    assert torch.multiprocessing.get_sharing_strategy() == "file_system"
+    kw = loader_kwargs(8, 4)
+    assert torch.multiprocessing.get_sharing_strategy() == "file_system", \
+        "loader_kwargs must set file_system sharing when workers are used"
+    assert kw["persistent_workers"] is True and kw["prefetch_factor"] == 4
+    # workers=0 must not pass worker-only kwargs (DataLoader rejects them)
+    assert "persistent_workers" not in loader_kwargs(0)
+    assert "prefetch_factor" not in loader_kwargs(0)
+    s = shm_size_mb()
+    assert s is None or s > 0
+    print("  loader_kwargs forces file_system sharing; workers=0 kwargs are valid")
+
+
 if __name__ == "__main__":
     for fn in (test_roundtrip, test_stride_picks_every_kth_frame,
                test_stride_extends_the_horizon, test_stats_are_on_the_transformed_actions,
@@ -420,6 +444,7 @@ if __name__ == "__main__":
                test_warmup_cosine_shape, test_full_lora_targets_cover_both_towers,
                test_init_from_keeps_this_runs_stats, test_loader_kwargs,
                test_finetune_flags, test_freeze_llm_keep_vision,
+               test_loader_uses_file_system_sharing,
                test_pi_family_inference_fixes, test_gate_verdict):
         print(f"{fn.__name__}:")
         fn()
