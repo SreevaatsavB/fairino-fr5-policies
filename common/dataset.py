@@ -171,7 +171,8 @@ class ResizeWithPad:
 
 
 def _build_transform(image_size: tuple, aug_level: str,
-                     pad_resize: bool = False) -> _SeededTransform:
+                     pad_resize: bool = False,
+                     aug_prob: float = 1.0) -> _SeededTransform:
     """
     Returns a _SeededTransform so that multiple frames in the same observation
     window can be augmented with identical parameters (same crop position,
@@ -182,6 +183,13 @@ def _build_transform(image_size: tuple, aug_level: str,
       "crops"  — random resized crop + mild brightness jitter + ImageNet norm
       "full"   — crops + background texture replacement + brightness jitter + norm
 
+    aug_prob: fraction of samples that get the photometric jitter at all; the rest
+      pass through completely clean. 1.0 reproduces openpi, whose ColorJitter is
+      gated on nothing (models/model.py:181). Lower it when the deployment scene
+      varies far less than the jitter range does — augmenting every sample then
+      spends model capacity on variation that never occurs. Geometry (resize) is
+      never gated: it is framing, not noise.
+
     pad_resize: letterbox instead of squashing (format v3, what pi0_base was
       pretrained on). MUST match the pad_resize flag recorded in the checkpoint,
       which is what common/deploy.py reads to pick its own transform — squashing
@@ -189,6 +197,12 @@ def _build_transform(image_size: tuple, aug_level: str,
       invalidated every pre-2026-07-28 robot trial.
     """
     h, w = image_size
+    aug_prob = min(max(float(aug_prob), 0.0), 1.0)
+    # wrap the photometric ops so only aug_prob of samples get them. At 1.0 this
+    # collapses to a plain Compose, so the openpi-equivalent path carries no extra
+    # RandomApply.
+    _maybe = (lambda *t: transforms.Compose(list(t))) if aug_prob >= 1.0 else \
+             (lambda *t: transforms.RandomApply(list(t), p=aug_prob))
     # swap the plain squash-resize for the letterbox at both scales the aug levels use
     _rs = (lambda th, tw: ResizeWithPad(th, tw)) if pad_resize else \
           (lambda th, tw: transforms.Resize((th, tw)))
@@ -206,9 +220,10 @@ def _build_transform(image_size: tuple, aug_level: str,
         # single-marker benchmark). Resize is deterministic (not a random crop).
         base = transforms.Compose([
             _rs(h, w),
-            transforms.ColorJitter(brightness=0.3, contrast=0.3),
-            transforms.RandomApply(
-                [transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))], p=0.5),
+            _maybe(transforms.ColorJitter(brightness=0.3, contrast=0.3),
+                   transforms.RandomApply(
+                       [transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))],
+                       p=0.5)),
             transforms.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD),
         ])
 
@@ -266,13 +281,14 @@ class FR5Dataset(Dataset):
     def __init__(self, root, chunk_size=100, use_image=True,
                  image_size=(224, 224), episode_indices=None,
                  aug_level="none", n_obs_steps=1, frame_stride=1,
-                 pad_resize=False):
+                 pad_resize=False, aug_prob=1.0):
         self.root        = Path(root)
         self.chunk_size  = chunk_size
         self.use_image   = use_image
         self.image_size  = image_size
         self.aug_level   = aug_level
         self.pad_resize  = bool(pad_resize)
+        self.aug_prob    = float(aug_prob)
         self.n_obs_steps = n_obs_steps
         # take every Kth frame as a training START sample (the 30 Hz capture is
         # heavily oversampled; chunks are still predicted at the full rate). Must
@@ -312,7 +328,8 @@ class FR5Dataset(Dataset):
         else:
             self._task_map = {}
 
-        self._img_transform = _build_transform(image_size, aug_level, self.pad_resize)
+        self._img_transform = _build_transform(image_size, aug_level,
+                                               self.pad_resize, self.aug_prob)
 
     def _build_index(self):
         samples = []
