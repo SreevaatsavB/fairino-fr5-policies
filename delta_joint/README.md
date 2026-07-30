@@ -279,7 +279,19 @@ Separate issues, all verified, none of them the cause of the wandering:
    raw prediction, because the launcher caps joint targets *below* the level
    deploy records at. Measured `mean|executed − pred| = 0.00°` across 450 steps.
    The real commanded stream lives only in `servo.csv`.
-4. **The predeploy gate's test C is mis-specified for this dataset.** It demands
+4. **The instruction vocabulary was an episode-ID lookup key.**
+   `convert_episodes.py` passes each raw episode's `language_instruction` through
+   unchanged, giving 400 unique strings over 9 canonical tasks — a 1:1
+   episode↔phrasing binding, so the instruction could be used to recall *which
+   trajectory this was* rather than *what to do*. The v3 training patch swapped in
+   the canonical string 50% of the time to weaken the binding; `tools/
+   rebalance_instructions.py` fixes the data instead: it keeps a small SHARED
+   vocabulary per canonical task (the canonical string plus a few of that group's
+   real phrasings) and assigns it round-robin. At `--variants 5`: 400 strings → 45,
+   ~8.9 episodes each. Nothing is invented — every surviving instruction is one the
+   operator wrote. Language still separates the 9 tasks; it can no longer name an
+   episode. Run it before converting/pushing the next dataset revision.
+5. **The predeploy gate's test C is mis-specified for this dataset.** It demands
    that different instructions produce different trajectories, but our dataset
    binds one unique phrasing per episode and deliberately swaps in a canonical
    string 50% of the time to *break* that binding. All nine strings describe one
