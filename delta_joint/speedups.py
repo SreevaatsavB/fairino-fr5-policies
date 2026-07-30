@@ -130,3 +130,75 @@ def probe_input_bound(loader, n=20):
     print("[probe] compare against your s/step: if it is a large fraction, raise "
           "num_workers before touching batch size")
     return per_batch
+
+
+# ── finetune modes ────────────────────────────────────────────────────────────
+# openpi's primary recipe is FULL fine-tune: README lists it as ">70 GB, A100
+# (80GB)/H100" against LoRA's ">22.5 GB, RTX 4090", and the LoRA configs are named
+# *_low_mem_finetune. On an A100-80 there is no reason to run the 4090 recipe.
+#
+# The trap in the LoRA path: policies/pi0/model.py:181 sets
+#     train_expert_only = cfg.train_expert_only or cfg.vlm_lora_rank > 0
+# and lerobot's train_expert_only (modeling_pi0.py:428) freezes ALL of paligemma,
+# vision tower included. openpi's get_freeze_filter (pi0_config.py:88) freezes only
+# PathRegex(".*llm.*"), and the model is nnx.Dict(llm=llm, img=img) (pi0.py:91) —
+# so SigLIP is never frozen there. Freezing it is our deviation, not their recipe,
+# and it is the worst thing to freeze on a camera rig the base model has never seen.
+
+FINETUNE_MODES = ("full", "lora", "expert_only")
+
+
+def finetune_flags(mode, lora_rank=16):
+    """Model-config flags for a finetune mode. 'full' is openpi's primary recipe.
+
+    'lora' deliberately leaves train_expert_only False so lerobot does not freeze
+    the vision tower; call freeze_llm_keep_vision() after build to get openpi's
+    actual shape (Gemma frozen except adapters, SigLIP trainable).
+    """
+    if mode not in FINETUNE_MODES:
+        raise ValueError(f"mode must be one of {FINETUNE_MODES}, got {mode!r}")
+    return {
+        "full":        dict(vlm_lora_rank=0, freeze_vision_encoder=False,
+                            train_expert_only=False),
+        "lora":        dict(vlm_lora_rank=lora_rank, freeze_vision_encoder=False,
+                            train_expert_only=False),
+        "expert_only": dict(vlm_lora_rank=0, freeze_vision_encoder=False,
+                            train_expert_only=True),
+    }[mode]
+
+
+def freeze_llm_keep_vision(model):
+    """ENFORCE openpi's LoRA shape: Gemma LLM frozen; SigLIP, expert and adapters
+    trainable — regardless of what lerobot froze before this call.
+
+    It must un-freeze, not just freeze: with vlm_lora_rank > 0, model.py:181 sets
+    train_expert_only, and lerobot's _set_requires_grad then freezes ALL of
+    paligemma INCLUDING the vision tower. openpi never freezes the vision tower
+    (freeze filter is PathRegex(\".*llm.*\"); the model is nnx.Dict(llm=..., img=...)),
+    so the tower must be switched back on here.
+
+    Matches on parameter NAME substrings rather than a hardcoded module path, so it
+    survives lerobot renaming its internals; the asserts fail loudly if the naming
+    ever stops matching instead of silently training the wrong subset.
+    """
+    frozen = vision = expert = adapters = 0
+    for name, p in model.named_parameters():
+        if "lora_" in name:
+            p.requires_grad = True
+            adapters += p.numel()
+        elif "vision_tower" in name:
+            p.requires_grad = True          # lerobot froze it; openpi trains it
+            vision += p.numel()
+        elif "gemma_expert" in name:
+            p.requires_grad = True
+            expert += p.numel()
+        elif "paligemma" in name:
+            p.requires_grad = False         # the Gemma LLM (+ projector): frozen
+            frozen += p.numel()
+
+    assert frozen, "no paligemma LLM params matched — lerobot naming changed"
+    assert vision, "no vision_tower params found — refusing to guess"
+    print(f"[finetune] openpi LoRA shape: froze {frozen/1e6:.0f}M Gemma | trainable: "
+          f"vision {vision/1e6:.0f}M + expert {expert/1e6:.0f}M + adapters "
+          f"{adapters/1e6:.1f}M")
+    return model

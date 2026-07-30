@@ -298,6 +298,115 @@ def test_loader_kwargs():
     print("  loader_kwargs valid at 0 and >0 workers")
 
 
+def test_finetune_flags():
+    """'full' is openpi's primary recipe; no mode may freeze the vision tower."""
+    from speedups import finetune_flags, FINETUNE_MODES
+    full = finetune_flags("full")
+    assert full["vlm_lora_rank"] == 0 and not full["train_expert_only"]
+    lora = finetune_flags("lora", 16)
+    # the bug this guards: train_expert_only=True would make lerobot freeze ALL of
+    # paligemma including SigLIP, which openpi's freeze filter never does
+    assert lora["vlm_lora_rank"] == 16 and lora["train_expert_only"] is False
+    for m in FINETUNE_MODES:
+        assert finetune_flags(m)["freeze_vision_encoder"] is False, m
+    try:
+        finetune_flags("nonsense"); raise AssertionError("should reject")
+    except ValueError:
+        pass
+    print("  full/lora/expert_only flags; no mode freezes the vision tower")
+
+
+def test_freeze_llm_keep_vision():
+    """Gemma frozen, SigLIP + expert + adapters still trainable."""
+    from speedups import freeze_llm_keep_vision
+
+    class Fake(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.paligemma_language_model = torch.nn.Linear(4, 4)
+            self.paligemma_vision_tower = torch.nn.Linear(4, 4)
+            self.gemma_expert = torch.nn.Linear(4, 4)
+            self.paligemma_lora_A = torch.nn.Linear(4, 4)
+            # the real lora-mode situation: model.py's `or rank>0` made lerobot
+            # freeze EVERYTHING (vision tower included) before this helper runs
+            for p in self.parameters():
+                p.requires_grad_(False)
+
+    m = freeze_llm_keep_vision(Fake())
+    g = dict(m.named_parameters())
+    assert not g["paligemma_language_model.weight"].requires_grad, "Gemma not frozen"
+    assert g["paligemma_vision_tower.weight"].requires_grad, "SigLIP was frozen!"
+    assert g["gemma_expert.weight"].requires_grad, "expert was frozen"
+    assert g["paligemma_lora_A.weight"].requires_grad, "adapters were frozen"
+
+    class NoVision(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.paligemma_language_model = torch.nn.Linear(4, 4)
+
+    try:
+        freeze_llm_keep_vision(NoVision()); raise AssertionError("should assert")
+    except AssertionError as e:
+        assert "vision_tower" in str(e), e
+    print("  freeze_llm_keep_vision: Gemma frozen, vision/expert/adapters trainable")
+
+
+def test_pi_family_inference_fixes():
+    """int64 attention mask -> torch.where crash on lerobot 0.5.1 (the training
+    notebooks patch it; standalone inference had nothing). And a None tokenizer
+    must refuse to run, not silently strip language conditioning."""
+    from dataset_delta import _fix_pi_family
+
+    class Pi:
+        tokenizer = object()
+        def _tokenize(self, task, device):
+            return torch.zeros(1, 4, dtype=torch.long), torch.ones(1, 4, dtype=torch.long)
+        def predict(self, obs_state, obs_image=None, task=None): return torch.zeros(7)
+        def reset(self): pass
+
+    m = for_inference(Pi(), "delta_joint")
+    _, mask = m._tokenize(["x"], "cpu")
+    assert mask.dtype == torch.bool, f"mask still {mask.dtype} — torch.where will crash"
+
+    class NoTok(Pi):
+        tokenizer = None
+    try:
+        for_inference(NoTok(), "delta_joint")
+        raise AssertionError("None tokenizer must refuse to run")
+    except SystemExit:
+        pass
+
+    class Act:                                     # no _tokenize: must pass through
+        def predict(self, obs_state, obs_image=None, task=None): return torch.zeros(7)
+        def reset(self): pass
+    for_inference(Act(), "joint")
+    print("  mask -> bool, None tokenizer refused, non-language policies untouched")
+
+
+def test_gate_verdict():
+    """The gate must FAIL the measured 30k-run numbers and PASS a working policy."""
+    import gate
+
+    def ep(model_err, grip_max, n=100):
+        rng = np.random.default_rng(0)
+        gt = np.zeros((n, 7)); gt[:, :6] = np.cumsum(rng.normal(0, .1, (n, 6)), 0)
+        gt[n // 2:, 6] = 1.0                                     # GT closes
+        state = gt.copy(); state[1:, :6] = gt[:-1, :6]           # null err ~0.08 deg
+        pred = gt.copy(); pred[:, :6] += model_err; pred[:, 6] = grip_max
+        return {"pred": pred, "gt": gt, "state": state}
+
+    # the 30k run: model 1.656 vs null 0.075, gripper max 0.154 -> both criteria fail
+    passed, lines = gate.verdict([("ep000", gate.episode_stats(ep(1.656, 0.154)))])
+    assert not passed, "gate PASSED the 30k-run numbers!"
+    # a policy that beats the null and commits to the grasp -> pass
+    passed, _ = gate.verdict([("ep000", gate.episode_stats(ep(0.02, 0.9)))])
+    assert passed
+    # NaN gt rows (deploy npz has no gt) are excluded, not crashed on
+    a = ep(0.02, 0.9); a["gt"][:10] = np.nan
+    assert gate.episode_stats(a)["n"] == 90
+    print("  gate fails the 30k numbers, passes a working policy, tolerates NaN gt")
+
+
 if __name__ == "__main__":
     for fn in (test_roundtrip, test_stride_picks_every_kth_frame,
                test_stride_extends_the_horizon, test_stats_are_on_the_transformed_actions,
@@ -307,7 +416,9 @@ if __name__ == "__main__":
                test_held_actions_are_independent, test_take_flag_edges,
                test_rollout_axis_labels, test_scaled_lr,
                test_warmup_cosine_shape, test_full_lora_targets_cover_both_towers,
-               test_init_from_keeps_this_runs_stats, test_loader_kwargs):
+               test_init_from_keeps_this_runs_stats, test_loader_kwargs,
+               test_finetune_flags, test_freeze_llm_keep_vision,
+               test_pi_family_inference_fixes, test_gate_verdict):
         print(f"{fn.__name__}:")
         fn()
     print("\nall action-scale checks passed")

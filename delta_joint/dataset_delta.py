@@ -201,6 +201,35 @@ def hold(model, stride):
     return model
 
 
+def _fix_pi_family(model):
+    """Two inference-only bugs in the pi-family wrappers, fixed where every
+    delta_joint inference route passes (deploy, eval, gate):
+
+    1. model._tokenize returns an int64 attention mask (HF default). lerobot
+       0.5.1 cats it with its bool image masks -> everything promotes to int64 ->
+       torch.where(int64_condition, ...) raises RuntimeError. The training
+       notebooks patch the consumer; standalone inference on the robot PC has no
+       patch. .bool() at the source is the fix the 2026-07-28 launcher proved
+       over 451 live steps.
+    2. model.tokenizer silently falls back to None (no HF auth / empty cache) and
+       _tokenize then emits ZERO tokens — language conditioning stripped with no
+       error. Refuse to run instead.
+    """
+    if getattr(model, "_tokenize", None) is None:
+        return                                       # ACT / diffusion: no language
+    if getattr(model, "tokenizer", "absent") is None:
+        raise SystemExit(
+            "PaliGemma tokenizer failed to load (HF auth / licence / empty cache?) "
+            "— refusing to run with zero language tokens")
+    original = model._tokenize
+
+    def tokenize_bool(task, device):
+        ids, mask = original(task, device)
+        return ids, mask.bool()
+
+    model._tokenize = tokenize_bool
+
+
 def for_inference(model, action_space):
     """Apply whatever the checkpoint's action_space string asks for, in order.
 
@@ -208,6 +237,7 @@ def for_inference(model, action_space):
     """
     if getattr(model, "_delta_configured", False):
         return model
+    _fix_pi_family(model)
     base, stride = parse_action_space(action_space)
     if base == "delta_joint":
         absolutise(model)

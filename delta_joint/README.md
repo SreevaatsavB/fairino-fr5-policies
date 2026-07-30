@@ -208,6 +208,8 @@ wrong speed or with the state left off.
 |---|---|
 | `dataset_delta.py` | the dataset transform, matching stats, and the two inference wrappers |
 | `run.py` | `train` / `deploy` / `eval` entry points |
+| `gate.py` | offline pass/fail on eval npz — exit 0 = book robot time |
+| `speedups.py` | compile / LoRA targets / schedule / warm-start / finetune modes |
 | `test_delta_joint.py` | 13 checks: round-trip, stride correctness, stats-match-getitem, both wrappers, idempotence, aliasing, CLI edges |
 
 ---
