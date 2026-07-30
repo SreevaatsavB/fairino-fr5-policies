@@ -154,10 +154,55 @@ def test_dry_run_writes_nothing():
         print("  --dry-run leaves the dataset byte-identical")
 
 
+def test_openpi_clean_matches_tokenizer():
+    """Must reproduce openpi/src/openpi/models/tokenizer.py:23 exactly:
+        prompt.strip().replace("_", " ").replace("\\n", " ")
+    so what is stored in tasks.parquet is what the model tokenizes."""
+    from rebalance_instructions import openpi_clean
+    cases = {
+        "  pick_up the block ": "pick up the block",
+        "put the\nblock in the bin": "put the block in the bin",
+        "pick   up  the block": "pick up the block",
+        "Place all Cream objects into the Cream Tray.":
+            "Place all Cream objects into the Cream Tray.",
+    }
+    for raw, want in cases.items():
+        assert openpi_clean(raw) == want, (raw, openpi_clean(raw), want)
+    # pi0 (flow) does NOT lowercase — only the FAST tokenizers do
+    assert openpi_clean("Put The Block") == "Put The Block"
+    # idempotent, so re-running the tool never churns the text
+    for raw in cases:
+        assert openpi_clean(openpi_clean(raw)) == openpi_clean(raw)
+    print("  openpi_clean matches tokenizer.py:23, preserves case, idempotent")
+
+
+def test_style_warnings():
+    """Flags what is out of distribution for the pretraining mixture."""
+    from rebalance_instructions import style_warnings
+    assert style_warnings("put the block in the bin") == []
+    assert any("words" in w for w in style_warnings(" ".join(["word"] * 20)))
+    assert any("ALL CAPS" in w for w in style_warnings("PUT THE BLOCK IN THE BIN"))
+    assert any("cleanup" in w for w in style_warnings("put_the block"))
+    print("  style_warnings flags long / ALL CAPS / uncleaned, passes DROID style")
+
+
+def test_vocabulary_is_cleaned():
+    """Instructions land in tasks.parquet already normalized."""
+    from rebalance_instructions import build_vocabulary
+    canonical = {0: {"canonical": " pick_up the block ", "instruction": " pick_up the block "},
+                 1: {"canonical": " pick_up the block ", "instruction": "grab  the block"}}
+    assign, vocab = build_vocabulary(canonical, 2)
+    for v in vocab[" pick_up the block "]:
+        assert v == v.strip() and "_" not in v and "  " not in v, v
+    assert "pick up the block" in assign.values()
+    print("  build_vocabulary emits openpi-clean text")
+
+
 if __name__ == "__main__":
     for fn in (test_vocabulary_shape, test_determinism, test_variants_exceeding_pool,
                test_end_to_end_rewrite, test_refuses_without_canonical_map,
-               test_dry_run_writes_nothing):
+               test_dry_run_writes_nothing, test_openpi_clean_matches_tokenizer,
+               test_style_warnings, test_vocabulary_is_cleaned):
         print(f"{fn.__name__}:")
         fn()
     print("\nall instruction-rebalance checks passed")

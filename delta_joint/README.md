@@ -291,7 +291,25 @@ Separate issues, all verified, none of them the cause of the wandering:
    ~8.9 episodes each. Nothing is invented — every surviving instruction is one the
    operator wrote. Language still separates the 9 tasks; it can no longer name an
    episode. Run it before converting/pushing the next dataset revision.
-5. **The predeploy gate's test C is mis-specified for this dataset.** It demands
+5. **Instruction granularity is ~60x coarser than pi0's pretraining labels.**
+   The pi0 paper (arXiv 2410.24164) describes its language supervision as *"diverse
+   language labels, combining task names and **segment annotations** (fine-grained
+   labels for sub-trajectories, typically about **2 seconds** in length)"* — a
+   bussing episode carries *"around 30 instructions in one episode"*, and a
+   high-level VLM emits atomic commands like *"pick up the napkin"* / *"throw the
+   napkin into the trash"*. Our label covers a whole **2-minute** episode: one
+   string for ~3600 frames. So the base model's language pathway was trained to
+   answer "what do I do in the next 2 s", and we ask it "what is the goal of the
+   next 2 min". This is the same aliasing the single-frame observation suffers
+   (§6), seen from the language side, and it is a **data-collection** fix
+   (segment-level annotation), not a code fix. Style is a smaller matter but
+   sourced: openpi's `PaligemmaTokenizer` does
+   `prompt.strip().replace("_"," ").replace("\n"," ")` and then appends one `"\n"`
+   — it does **not** lowercase (only the FAST tokenizers do), and DROID's
+   crowd-sourced labels are short concrete imperatives ("Put the yellow block in
+   the blue cup", 5-12 words). `tools/rebalance_instructions.py` now stores text
+   already in that exact cleaned form and flags outliers.
+6. **The predeploy gate's test C is mis-specified for this dataset.** It demands
    that different instructions produce different trajectories, but our dataset
    binds one unique phrasing per episode and deliberately swaps in a canonical
    string 50% of the time to *break* that binding. All nine strings describe one

@@ -45,6 +45,36 @@ from pathlib import Path
 import pandas as pd
 import pyarrow.parquet as pq
 
+# openpi's PaligemmaTokenizer does exactly this before encoding (verified in
+# openpi/src/openpi/models/tokenizer.py:23), then appends a single "\n":
+#     cleaned = prompt.strip().replace("_", " ").replace("\n", " ")
+# Storing text that is already in this form means what you read in tasks.parquet is
+# byte-for-byte what the model sees. NOTE pi0 does NOT lowercase (only the FAST
+# tokenizers do, lines 67/180/303), so case is preserved here too.
+def openpi_clean(text: str) -> str:
+    return " ".join(text.strip().replace("_", " ").replace("\n", " ").split())
+
+
+# Style of the pretraining mixture, for reference when writing new instructions:
+# DROID's crowd-sourced labels are short concrete imperatives — "Put the yellow
+# block in the blue cup", "pick up the sponge and put it in the sink" — typically
+# 5-12 words, object + destination, mixed case. Anything much longer than this is
+# out of distribution for the base model.
+STYLE_MAX_WORDS = 14
+
+
+def style_warnings(text: str) -> list:
+    """Non-fatal style notes measured against the pretraining mixture."""
+    out = []
+    n = len(text.split())
+    if n > STYLE_MAX_WORDS:
+        out.append(f"{n} words (pretraining labels are ~5-12)")
+    if text != openpi_clean(text):
+        out.append("needs openpi cleanup (underscores / whitespace / newlines)")
+    if text.isupper():
+        out.append("ALL CAPS")
+    return out
+
 
 def build_vocabulary(canonical: dict, variants: int):
     """episode -> new instruction, using a small shared vocabulary per canonical task.
@@ -61,7 +91,9 @@ def build_vocabulary(canonical: dict, variants: int):
     for canon, members in sorted(groups.items()):
         # the canonical string first, then distinct existing phrasings, sorted for
         # determinism. Never invents text.
-        pool = [canon] + [p for p in sorted({m[1] for m in members}) if p != canon]
+        pool = [openpi_clean(canon)]
+        pool += [p for p in sorted({openpi_clean(m[1]) for m in members})
+                 if p != pool[0]]
         vocab = pool[:max(1, variants)]
         vocab_per_group[canon] = vocab
         for i, (ep, _) in enumerate(members):
@@ -110,10 +142,18 @@ def main():
     print(f"unique instructions     : {b} -> {a}")
     print(f"episodes per instruction: {b_ratio:.1f} -> {a_ratio:.1f}")
     print()
+    flagged = 0
     for canon, vs in sorted(vocab.items()):
         print(f"  [{canon}]")
         for v in vs:
-            print(f"      {after[v]:3d} eps  {v}")
+            notes = style_warnings(v)
+            flagged += bool(notes)
+            suffix = f"   <- {'; '.join(notes)}" if notes else ""
+            print(f"      {after[v]:3d} eps  {v}{suffix}")
+    if flagged:
+        print(f"\n{flagged} instruction(s) flagged. pi0 was pretrained on short "
+              f"concrete imperatives (DROID style: \"put the X in the Y\", 5-12 "
+              f"words); fix them at the source meta.json and re-convert.")
 
     if args.dry_run:
         print("\ndry run — nothing written")
