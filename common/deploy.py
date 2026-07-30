@@ -420,9 +420,15 @@ def main():
                         help="ignore camera even if checkpoint was trained with images")
     parser.add_argument("--no-log",     action="store_true",
                         help="do not record predicted actions to <ckpt_dir>/rollouts/")
-    parser.add_argument("--task", default="pick up the block and place it in the bin",
+    # Must be one of the dataset's instructions or the model gets a sentence it never
+    # saw. The v2 set now carries 9 (3 colours x 3 trays, ~44 episodes each) —
+    # `python -c "import pyarrow.parquet as pq; print(pq.read_table('<root>/meta/tasks.parquet').to_pandas())"`
+    parser.add_argument("--task",
+                        default="Pick up each blue block and put it in the brown tray.",
                         help="language instruction for language-conditioned policies "
-                             "(dit_flow / pi0 / pi05 / pi0_fast); ignored by ACT / Diffusion")
+                             "(dit_flow / pi0 / pi05 / pi0_fast); ignored by ACT / "
+                             "Diffusion. Use one of the 9 strings in the dataset's "
+                             "meta/tasks.parquet — anything else is out of distribution")
     parser.add_argument("--te-coeff", default=None,
                         help="inference-only override: temporal-ensembling coeff for chunk "
                              "policies (e.g. 0.01), or 'off' to disable. Works on existing "

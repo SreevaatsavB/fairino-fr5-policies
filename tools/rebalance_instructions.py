@@ -1,173 +1,111 @@
 #!/usr/bin/env python3
 """
-rebalance_instructions.py — shrink a dataset's instruction vocabulary so language
-carries task meaning instead of episode identity.
+rebalance_instructions.py — collapse the instruction vocabulary to 9 shared,
+natural sentences so language means "which colour goes in which tray", nothing else.
 
-The problem
-───────────
-convert_episodes.py passes each raw episode's `language_instruction` through
-unchanged, so the 2026-07 set ends up with 400 unique strings over 9 canonical
-tasks — a 1:1 episode↔phrasing binding. The instruction then works as an
-episode-ID lookup key: a model can use it to recall "which trajectory was this"
-rather than "what am I being asked to do". The v3 training patch papered over
-this by swapping in the canonical string 50% of the time; this fixes the data.
+Why: the 2026-07 set carries 400 unique per-episode instructions over 9 canonical
+tasks, so the instruction identifies the episode. Counts and shapes ("the three
+brown cubes", "1 cube + 1 cuboid") belong to the camera, not the prompt — leaving
+them in the text lets the model read them instead of looking.
 
-What it does
-────────────
-For each canonical task, keeps a SMALL SHARED vocabulary — the canonical string
-plus (variants-1) of that group's existing phrasings — and assigns it round-robin
-across the group's episodes. Nothing is invented: every surviving instruction is
-one the operator actually wrote.
-
-    before   400 strings / 400 episodes   = 1.0 episodes per string
-    after      9 x 5 = 45 strings         ~ 8.9 episodes per string
-
-Language still separates the 9 canonical tasks (real signal) and still varies in
-phrasing (paraphrase robustness), but can no longer identify an episode.
+    before  400 strings / 400 episodes  = 1.0 episodes per string
+    after     9 strings / 400 episodes  ~  44 episodes per string
 
 Usage
 ─────
-    python tools/rebalance_instructions.py <dataset_root> --variants 5 --dry-run
-    python tools/rebalance_instructions.py <dataset_root> --variants 5
+    python tools/rebalance_instructions.py <dataset_root> --dry-run
+    python tools/rebalance_instructions.py <dataset_root>
 
-Rewrites meta/tasks.parquet and the data parquet's task_index column in place
-(after a .bak copy). Requires meta/canonical_tasks.json (written by
-convert_and_push_dataset_v2.ipynb §8); without it there is no grouping to
-rebalance and the script refuses rather than guessing.
+Rewrites meta/tasks.parquet and every data shard's task_index (.bak alongside).
+Needs meta/canonical_tasks.json for the episode -> canonical mapping.
 """
 
 import argparse
 import json
 import shutil
-from collections import defaultdict
+from collections import Counter
 from pathlib import Path
 
 import pandas as pd
 import pyarrow.parquet as pq
 
-# openpi's PaligemmaTokenizer does exactly this before encoding (verified in
-# openpi/src/openpi/models/tokenizer.py:23), then appends a single "\n":
-#     cleaned = prompt.strip().replace("_", " ").replace("\n", " ")
-# Storing text that is already in this form means what you read in tasks.parquet is
-# byte-for-byte what the model sees. NOTE pi0 does NOT lowercase (only the FAST
-# tokenizers do, lines 67/180/303), so case is preserved here too.
-def openpi_clean(text: str) -> str:
-    return " ".join(text.strip().replace("_", " ").replace("\n", " ").split())
-
-
-# Style of the pretraining mixture, for reference when writing new instructions:
-# DROID's crowd-sourced labels are short concrete imperatives — "Put the yellow
-# block in the blue cup", "pick up the sponge and put it in the sink" — typically
-# 5-12 words, object + destination, mixed case. Anything much longer than this is
-# out of distribution for the base model.
-STYLE_MAX_WORDS = 14
-
-
-def style_warnings(text: str) -> list:
-    """Non-fatal style notes measured against the pretraining mixture."""
-    out = []
-    n = len(text.split())
-    if n > STYLE_MAX_WORDS:
-        out.append(f"{n} words (pretraining labels are ~5-12)")
-    if text != openpi_clean(text):
-        out.append("needs openpi cleanup (underscores / whitespace / newlines)")
-    if text.isupper():
-        out.append("ALL CAPS")
-    return out
-
-
-def build_vocabulary(canonical: dict, variants: int):
-    """episode -> new instruction, using a small shared vocabulary per canonical task.
-
-    canonical: {ep_index: {"canonical": str, "instruction": str}}
-    Deterministic: groups and phrasings are sorted before selection, so re-running
-    on the same dataset produces the same assignment.
-    """
-    groups = defaultdict(list)
-    for ep, rec in sorted(canonical.items(), key=lambda kv: int(kv[0])):
-        groups[rec["canonical"]].append((int(ep), rec["instruction"]))
-
-    assignment, vocab_per_group = {}, {}
-    for canon, members in sorted(groups.items()):
-        # the canonical string first, then distinct existing phrasings, sorted for
-        # determinism. Never invents text.
-        pool = [openpi_clean(canon)]
-        pool += [p for p in sorted({openpi_clean(m[1]) for m in members})
-                 if p != pool[0]]
-        vocab = pool[:max(1, variants)]
-        vocab_per_group[canon] = vocab
-        for i, (ep, _) in enumerate(members):
-            assignment[ep] = vocab[i % len(vocab)]
-    return assignment, vocab_per_group
-
-
-def _stats(per_string_counts):
-    n_str = len(per_string_counts)
-    n_eps = sum(per_string_counts.values())
-    return n_str, n_eps, (n_eps / n_str if n_str else 0.0)
+# The 9 canonical templates, rewritten as plain spoken English — colour + tray only.
+#
+# Form mirrors a real DROID-Kitchen label ("pick up the sponge and put it in the
+# sink"), the closest match in pi0's pretraining mixture. Four grammar decisions,
+# none of them cosmetic:
+#   - "each blue block ... put it": distributive singular, so the sentence is
+#     grammatical whether the scene holds one object or four. 146 of 400 episodes
+#     have exactly one, so a bare plural ("the blue blocks ... put them") would be
+#     ungrammatical for over a third of the dataset.
+#   - sentence case + full stop, matching the source canonical templates and DROID's
+#     written labels. openpi's tokenizer does NOT lowercase (only the FAST ones do),
+#     so what is written here is what the model sees.
+#   - "wooden tray": attributive adjective, not the noun-adjunct "wood tray".
+#   - no counts, no shapes (cube vs cuboid). Those are in the camera; naming them in
+#     the prompt lets the model read instead of look.
+NATURAL = {
+    "Place all Blue objects into the Brown Tray.":
+        "Pick up each blue block and put it in the brown tray.",
+    "Place all Blue objects into the Cream Tray.":
+        "Pick up each blue block and put it in the cream tray.",
+    "Place all Blue objects into the Wood Tray.":
+        "Pick up each blue block and put it in the wooden tray.",
+    "Place all Brown objects into the Brown Tray.":
+        "Pick up each brown block and put it in the brown tray.",
+    "Place all Brown objects into the Cream Tray.":
+        "Pick up each brown block and put it in the cream tray.",
+    "Place all Brown objects into the Wood Tray.":
+        "Pick up each brown block and put it in the wooden tray.",
+    "Place all Cream objects into the Brown Tray.":
+        "Pick up each cream block and put it in the brown tray.",
+    "Place all Cream objects into the Cream Tray.":
+        "Pick up each cream block and put it in the cream tray.",
+    "Place all Cream objects into the Wood Tray.":
+        "Pick up each cream block and put it in the wooden tray.",
+}
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("root", help="lerobot dataset root (contains meta/ and data/)")
-    ap.add_argument("--variants", type=int, default=5,
-                    help="phrasings kept per canonical task (default 5)")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="report the change without writing anything")
+    ap.add_argument("--dry-run", action="store_true", help="report, write nothing")
     args = ap.parse_args()
 
     root = Path(args.root)
     canon_path = root / "meta" / "canonical_tasks.json"
     if not canon_path.exists():
-        raise SystemExit(
-            f"{canon_path} not found. It maps episode -> canonical task and is what "
-            f"defines the grouping; without it there is nothing to rebalance. It is "
-            f"written by convert_and_push_dataset_v2.ipynb section 8.")
-
+        raise SystemExit(f"{canon_path} not found — it maps episode -> canonical task "
+                         f"(written by convert_and_push_dataset_v2.ipynb section 8)")
     canonical = json.loads(canon_path.read_text())
-    assignment, vocab = build_vocabulary(canonical, args.variants)
 
-    before = defaultdict(int)
-    for rec in canonical.values():
-        before[rec["instruction"]] += 1
-    after = defaultdict(int)
-    for instr in assignment.values():
-        after[instr] += 1
+    unknown = {v["canonical"] for v in canonical.values()} - set(NATURAL)
+    if unknown:
+        raise SystemExit("canonical templates with no natural rewrite — add them to "
+                         "NATURAL:\n  " + "\n  ".join(sorted(unknown)))
 
-    b, n_eps, b_ratio = _stats(before)
-    a, _, a_ratio = _stats(after)
-    print(f"episodes                : {n_eps}")
-    print(f"canonical tasks         : {len(vocab)}")
-    print(f"unique instructions     : {b} -> {a}")
-    print(f"episodes per instruction: {b_ratio:.1f} -> {a_ratio:.1f}")
-    print()
-    flagged = 0
-    for canon, vs in sorted(vocab.items()):
-        print(f"  [{canon}]")
-        for v in vs:
-            notes = style_warnings(v)
-            flagged += bool(notes)
-            suffix = f"   <- {'; '.join(notes)}" if notes else ""
-            print(f"      {after[v]:3d} eps  {v}{suffix}")
-    if flagged:
-        print(f"\n{flagged} instruction(s) flagged. pi0 was pretrained on short "
-              f"concrete imperatives (DROID style: \"put the X in the Y\", 5-12 "
-              f"words); fix them at the source meta.json and re-convert.")
+    assignment = {int(ep): NATURAL[v["canonical"]] for ep, v in canonical.items()}
+    counts = Counter(assignment.values())
+    before = len({v["instruction"] for v in canonical.values()})
+
+    print(f"episodes            : {len(assignment)}")
+    print(f"unique instructions : {before} -> {len(counts)}")
+    print(f"episodes per string : {len(assignment)/max(before,1):.2f} -> "
+          f"{len(assignment)/len(counts):.1f}\n")
+    for text, n in sorted(counts.items()):
+        print(f"  {n:4d} eps   {text}")
 
     if args.dry_run:
         print("\ndry run — nothing written")
         return
 
-    # ── rewrite meta/tasks.parquet ────────────────────────────────────────────
-    new_tasks = sorted(after)                       # deterministic index order
-    task_to_idx = {t: i for i, t in enumerate(new_tasks)}
-    tasks_path = root / "meta" / "tasks.parquet"
-    shutil.copy2(tasks_path, tasks_path.with_suffix(".parquet.bak"))
-    pd.DataFrame({"task_index": range(len(new_tasks)),
-                  "task": new_tasks}).to_parquet(tasks_path, index=False)
+    tasks = sorted(counts)
+    idx = {t: i for i, t in enumerate(tasks)}
+    tp = root / "meta" / "tasks.parquet"
+    shutil.copy2(tp, tp.with_suffix(".parquet.bak"))
+    pd.DataFrame({"task_index": range(len(tasks)), "task": tasks}).to_parquet(tp, index=False)
 
-    # ── rewrite task_index in every data shard ────────────────────────────────
     shards = sorted((root / "data").rglob("*.parquet"))
     if not shards:
         raise SystemExit(f"no data parquet under {root/'data'}")
@@ -179,12 +117,10 @@ def main():
                              f"canonical_tasks.json — refusing a partial rewrite")
         shutil.copy2(shard, shard.with_suffix(".parquet.bak"))
         df["task_index"] = df["episode_index"].map(
-            lambda e: task_to_idx[assignment[int(e)]]).astype("int64")
+            lambda e: idx[assignment[int(e)]]).astype("int64")
         df.to_parquet(shard, index=False)
         print(f"rewrote {shard.relative_to(root)} ({len(df)} rows)")
-
-    print(f"\nwrote {tasks_path.relative_to(root)} ({len(new_tasks)} instructions)")
-    print("originals kept as *.bak next to each rewritten file")
+    print(f"\nwrote {tp.relative_to(root)} ({len(tasks)} instructions), .bak kept")
 
 
 if __name__ == "__main__":
