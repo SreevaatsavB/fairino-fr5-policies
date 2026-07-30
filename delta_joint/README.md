@@ -119,10 +119,22 @@ stride 10  ->  0.578 deg per step     9.9x
 Bonus: the 50-step chunk now covers **8.3 seconds instead of 1.67**, which
 independently helps on two-minute episodes.
 
-**Measured together on real data: ~6.5× net, not 5×5=25×.** Striding widens the
-chunk to 8.2 s, so the far entries move more and the normaliser std grows with
-them (3.0° → 8.2° at stride 5). Signal grows 4.8×, std grows 2.7×, net 6.5×.
-The two fixes help — they do not multiply cleanly.
+**Measured net: ~47× at entry 0 — but only with a SHORT chunk.** The normaliser is
+pooled over every chunk position, so a long horizon inflates it and de-resolves
+entry 0, the action actually executed now:
+
+| config | horizon | action_std | SNR@0 | vs absolute |
+|---|---|---|---|---|
+| absolute targets | 1.67 s | 95.9° | 0.0009 | 1× |
+| delta, chunk 50 × stride 1 | 1.67 s | 2.74° | 0.0420 | 45× |
+| **delta, chunk 10 × stride 5** | **1.67 s** | **2.55°** | **0.0408** | **~45×** |
+| delta, chunk 50 × stride 5 | 8.33 s | 9.04° | 0.0115 | 13× |
+
+The **delta transform is the whole win**. `action_stride` only helps if the chunk
+shortens to keep the horizon fixed — pairing stride 5 with a 50-entry chunk threw
+away two thirds of the gain. Hence `CHUNK_SIZE=10`, which is also what openpi's
+own fine-tune configs use (`pi0_libero action_horizon=10`, `pi05_libero` 15, DROID
+16); the 50 in `Pi0Config` is only a class default that every real config overrides.
 
 ### The catch that would have wrecked the arm
 
