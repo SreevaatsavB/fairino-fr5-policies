@@ -119,7 +119,10 @@ stride 10  ->  0.578 deg per step     9.9x
 Bonus: the 50-step chunk now covers **8.3 seconds instead of 1.67**, which
 independently helps on two-minute episodes.
 
-**Both together: ~25×.**
+**Measured together on real data: ~6.5× net, not 5×5=25×.** Striding widens the
+chunk to 8.2 s, so the far entries move more and the normaliser std grows with
+them (3.0° → 8.2° at stride 5). Signal grows 4.8×, std grows 2.7×, net 6.5×.
+The two fixes help — they do not multiply cleanly.
 
 ### The catch that would have wrecked the arm
 
@@ -218,8 +221,10 @@ wrong speed or with the state left off.
 
 Honest limits, so nobody reads more into this than it earns.
 
-- **5× and 5×, not a silver bullet.** Together ~25×. It takes signal/std from
-  0.0045 to roughly 0.11. That should be enough; it is not proven to be.
+- **Measured net gain is ~6.5×, not a silver bullet.** signal/std goes from
+  0.005 to 0.032 on the real data (striding widens the normaliser too, so the
+  5× and 5× do not multiply). Whether 6.5× clears the bar is exactly what the
+  offline gate decides; it is not proven in advance.
 - **This is untested on the robot.** Every number above is from recorded data and
   offline arithmetic. The claim "this fixes the wandering" is a hypothesis with
   good evidence, not a result.

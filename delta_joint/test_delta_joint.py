@@ -78,7 +78,9 @@ def test_stats_match_getitem():
     included — a mismatch silently mis-normalises every target."""
     for stride in (1, STRIDE):
         ds = _ds(action_stride=stride)
-        seen = np.concatenate([ds[i]["action"].numpy() for i in range(len(ds))])
+        # float64: np.std in float32 accumulates ~2e-3 error over the real
+        # dataset's 270k chunk-entries (measured) — get_stats itself is exact
+        seen = np.concatenate([ds[i]["action"].numpy() for i in range(len(ds))]).astype(np.float64)
         st = ds.get_stats()
         np.testing.assert_allclose(seen.mean(0), st["action_mean"], atol=1e-3)
         np.testing.assert_allclose(seen.std(0).clip(1e-6), st["action_std"], atol=1e-3)
