@@ -140,7 +140,38 @@ class _BackgroundAugment:
 
 # ── transform factory ─────────────────────────────────────────────────────────
 
-def _build_transform(image_size: tuple, aug_level: str) -> _SeededTransform:
+class ResizeWithPad:
+    """Aspect-preserving resize + centred letterbox — openpi/lerobot resize_with_pad.
+
+    Format v3: pi0_base was pretrained on letterboxed images, so squashing 640x480
+    into a square is an input-format deviation. Formula-identical to lerobot's
+    resize_with_pad_torch (itself an exact copy of openpi's): max-ratio, int
+    truncation of the resized dims, bilinear, clamp, centred pad with the extra
+    pixel bottom/right. common/deploy.py carries the same class for the robot path
+    (it cannot import this module without the teleop SDK on the PYTHONPATH);
+    test_pad_resize.py asserts the two stay identical.
+
+    Black bars are applied in [0,1] space, BEFORE ImageNet normalisation.
+    """
+
+    def __init__(self, h, w):
+        self.h, self.w = h, w
+
+    def __call__(self, img):                          # (C,H,W) float in [0,1]
+        import torch.nn.functional as F
+        c, ih, iw = img.shape
+        ratio = max(iw / self.w, ih / self.h)
+        nh, nw = int(ih / ratio), int(iw / ratio)
+        img = F.interpolate(img.unsqueeze(0), size=(nh, nw), mode="bilinear",
+                            align_corners=False).squeeze(0).clamp(0.0, 1.0)
+        out = img.new_zeros(c, self.h, self.w)
+        t, l = (self.h - nh) // 2, (self.w - nw) // 2
+        out[:, t:t + nh, l:l + nw] = img
+        return out
+
+
+def _build_transform(image_size: tuple, aug_level: str,
+                     pad_resize: bool = False) -> _SeededTransform:
     """
     Returns a _SeededTransform so that multiple frames in the same observation
     window can be augmented with identical parameters (same crop position,
@@ -150,12 +181,21 @@ def _build_transform(image_size: tuple, aug_level: str) -> _SeededTransform:
       "none"   — deterministic resize + ImageNet norm (always used for val)
       "crops"  — random resized crop + mild brightness jitter + ImageNet norm
       "full"   — crops + background texture replacement + brightness jitter + norm
+
+    pad_resize: letterbox instead of squashing (format v3, what pi0_base was
+      pretrained on). MUST match the pad_resize flag recorded in the checkpoint,
+      which is what common/deploy.py reads to pick its own transform — squashing
+      here while deploy letterboxes is the train/inference mismatch that
+      invalidated every pre-2026-07-28 robot trial.
     """
     h, w = image_size
+    # swap the plain squash-resize for the letterbox at both scales the aug levels use
+    _rs = (lambda th, tw: ResizeWithPad(th, tw)) if pad_resize else \
+          (lambda th, tw: transforms.Resize((th, tw)))
 
     if aug_level == "none":
         base = transforms.Compose([
-            transforms.Resize(image_size),
+            _rs(h, w),
             transforms.Normalize(mean=_IMAGENET_MEAN, std=_IMAGENET_STD),
         ])
 
@@ -165,7 +205,7 @@ def _build_transform(image_size: tuple, aug_level: str) -> _SeededTransform:
         # marker/bowl positions in pixel space are never moved (required for the
         # single-marker benchmark). Resize is deterministic (not a random crop).
         base = transforms.Compose([
-            transforms.Resize(image_size),
+            _rs(h, w),
             transforms.ColorJitter(brightness=0.3, contrast=0.3),
             transforms.RandomApply(
                 [transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))], p=0.5),
@@ -178,7 +218,7 @@ def _build_transform(image_size: tuple, aug_level: str) -> _SeededTransform:
         # RandomGrayscale from UMI — cheap, helps with lighting-change robustness.
         # Applied independently per frame (standard practice, same as UMI/Columbia).
         base = transforms.Compose([
-            transforms.Resize((int(h * 1.12), int(w * 1.12))),
+            _rs(int(h * 1.12), int(w * 1.12)),
             transforms.RandomCrop(image_size),
             transforms.ColorJitter(brightness=0.3, contrast=0.4,
                                    saturation=0.5, hue=0.08),
@@ -190,7 +230,7 @@ def _build_transform(image_size: tuple, aug_level: str) -> _SeededTransform:
         # Same jitter params + background texture replacement (Tier 2).
         # Background aug runs on raw [0, 1] tensor before norm.
         base = transforms.Compose([
-            transforms.Resize((int(h * 1.12), int(w * 1.12))),
+            _rs(int(h * 1.12), int(w * 1.12)),
             transforms.RandomCrop(image_size),
             transforms.ColorJitter(brightness=0.3, contrast=0.4,
                                    saturation=0.5, hue=0.08),
@@ -225,12 +265,14 @@ class FR5Dataset(Dataset):
 
     def __init__(self, root, chunk_size=100, use_image=True,
                  image_size=(224, 224), episode_indices=None,
-                 aug_level="none", n_obs_steps=1, frame_stride=1):
+                 aug_level="none", n_obs_steps=1, frame_stride=1,
+                 pad_resize=False):
         self.root        = Path(root)
         self.chunk_size  = chunk_size
         self.use_image   = use_image
         self.image_size  = image_size
         self.aug_level   = aug_level
+        self.pad_resize  = bool(pad_resize)
         self.n_obs_steps = n_obs_steps
         # take every Kth frame as a training START sample (the 30 Hz capture is
         # heavily oversampled; chunks are still predicted at the full rate). Must
@@ -270,7 +312,7 @@ class FR5Dataset(Dataset):
         else:
             self._task_map = {}
 
-        self._img_transform = _build_transform(image_size, aug_level)
+        self._img_transform = _build_transform(image_size, aug_level, self.pad_resize)
 
     def _build_index(self):
         samples = []
