@@ -87,6 +87,48 @@ def _patch_attention_mask_bool():
     return "attention_mask_bool: " + (", ".join(out) if out else "no targets found")
 
 
+#: policies lerobot eagerly imports but we never use. groot's GR00TN15Config is a
+#: @dataclass whose `backbone_cfg: dict = field(init=False)` has no default, which
+#: is a TypeError as soon as its transformers base contributes defaulted dataclass
+#: fields (PretrainedConfig is a dataclass from transformers 5.x). Because
+#: lerobot/policies/__init__.py imports groot at module scope, that one broken
+#: class takes down `from lerobot.policies.pi0...` and therefore every π-family
+#: policy. Stubbing is safe: nothing here touches groot.
+_UNUSED_POLICIES = ("lerobot.policies.groot",
+                    "lerobot.policies.groot.configuration_groot",
+                    "lerobot.policies.groot.modeling_groot",
+                    "lerobot.policies.groot.processor_groot")
+
+
+def stub_unused_policies():
+    """Insert empty modules for policies we never use, so lerobot's eager
+    policies/__init__ cannot crash the import of the ones we do.
+
+    MUST be called BEFORE the first `from lerobot.policies...` — unlike the other
+    shims here, this one cannot repair an import that has already failed. Returns
+    the names it stubbed (empty if lerobot was already imported successfully).
+    """
+    import sys
+    import types
+    if "lerobot.policies" in sys.modules:
+        return []                                  # already imported fine, leave it
+    stubbed = []
+    for name in _UNUSED_POLICIES:
+        if name not in sys.modules:
+            sys.modules[name] = types.ModuleType(name)
+            stubbed.append(name)
+    # policies/__init__ does `from .groot.configuration_groot import GrootConfig`
+    # and friends, so the names it looks up must exist on the stubs.
+    for attr, mod in (("GrootConfig", "lerobot.policies.groot.configuration_groot"),
+                      ("GrootPolicy", "lerobot.policies.groot.modeling_groot"),
+                      ("make_groot_pre_post_processors",
+                       "lerobot.policies.groot.processor_groot")):
+        setattr(sys.modules[mod], attr, None)
+    for attr in ("GrootConfig", "GrootPolicy", "make_groot_pre_post_processors"):
+        setattr(sys.modules["lerobot.policies.groot"], attr, None)
+    return stubbed
+
+
 def apply_lerobot_compat_patches(verbose: bool = False):
     """Apply every lerobot compat shim once. Safe to call repeatedly."""
     global _APPLIED

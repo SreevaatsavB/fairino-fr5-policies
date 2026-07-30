@@ -32,6 +32,19 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
+# lerobot eagerly imports its groot policy in policies/__init__, whose config has a
+# dataclass bug under transformers >= 5.x that takes down the WHOLE import — so
+# `from lerobot.policies.pi0...` below fails before it starts. Stub the policies we
+# never use first. Must precede the lerobot import; see common/lerobot_patches.py.
+try:
+    from lerobot_patches import stub_unused_policies
+except ImportError:  # pragma: no cover
+    import sys as _sys
+    from pathlib import Path as _Path
+    _sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "common"))
+    from lerobot_patches import stub_unused_policies
+stub_unused_policies()
+
 from lerobot.policies.pi0.configuration_pi0 import PI0Config as _LRConfig
 from lerobot.policies.pi0.modeling_pi0 import PI0Policy
 from lerobot.configs.types import PolicyFeature, FeatureType, NormalizationMode
