@@ -167,6 +167,33 @@ rather than away from it.
 5.6 °/s, which is slow enough that even the delta targets are small. That is what
 Fix 2 addresses.)
 
+### The gripper convention (checked against openpi source, 2026-07-30)
+
+Is 0 open and 1 close in the original pi0? **There is no single convention in the
+base model** — it was pretrained on a mixture whose embodiments contradict each
+other:
+
+| embodiment | gripper channel | where verified |
+|---|---|---|
+| ALOHA | **0 = closed, 1 = open** | `aloha_policy.py:117-138` — monotonic chain from `POSITION_CLOSED=0.01844` → `POSITION_OPEN=0.05800`, normalized (0,1) |
+| DROID | 0 = open, **1 = closed** | `droid_policy.py` passes the robot's `gripper_position` straight through (DROID convention) |
+| Libero | −1 open, +1 close | no gripper transform in `libero_policy.py` — native ±1 goes in as-is |
+
+Ours (0 = open, **1 = closed**, measured from the Slifold episodes) matches DROID
+and opposes ALOHA. Not a bug: fine-tuning fully retrains the action expert, so
+the channel's meaning is relearned from our data — at worst the base prior gives
+the gripper no head start. Two consequences:
+
+- What actually matters is **train/deploy consistency on our side**: dataset says
+  1 = closed; deploy closes at ≥ 0.65 and opens at ≤ 0.35. (Before 2026-07 deploy
+  had this inverted, and nothing could ever grasp regardless of the model.)
+- Because the base prior is agnostic-to-contradictory here, the gripper earns
+  everything from the fine-tune — consistent with grasp commitment being the last
+  behaviour to emerge in the v2 run, and with openpi issue #912, where three
+  independent platforms report arms that reach but never close. The delta
+  transform deliberately leaves this channel absolute; gate criterion 2 is what
+  watches it.
+
 ---
 
 ## 5. Using it
