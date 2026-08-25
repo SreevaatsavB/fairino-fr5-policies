@@ -168,10 +168,106 @@ def test_real_data_joint6_roll_if_present():
     print(f"  real data: J6-only motion is a pure tool-z roll, |axis·z| = {np.mean(z):.3f} on {len(sel)} frames")
 
 
+# ── xr1_stats: the generic stats module ──────────────────────────────────────
+
+def _two_arm_episode(n=12, seed=3):
+    """A synthetic XR-1 episode with BOTH arms, waist and base populated."""
+    rng = np.random.default_rng(seed)
+    def arm(k):
+        pos = np.cumsum(rng.normal(scale=0.01, size=(n, 3)), 0) + k
+        rot = np.stack([(R.from_rotvec(rng.normal(scale=0.05, size=3)) * R.from_rotvec([0.3*k, 0, 0])).as_matrix() for _ in range(n)])
+        grip = rng.integers(0, 2, size=(n, 1)).astype(float) * 2 - 1
+        return pos, rot, grip
+    lp, lr, lg = arm(0); rp, rr, rg = arm(1)
+    nxt = np.minimum(np.arange(n) + 1, n - 1)
+    waist = rng.normal(size=(n, 1)); base = rng.normal(size=(n, 3))
+    f = lambda a: np.asarray(a).reshape(n, -1).tolist()
+    return {
+        "num_frames": n,
+        "proprios": {"left_ee_pos": f(lp), "left_ee_rotm": f(lr.reshape(n, 9)), "left_arm_joint": f(rng.normal(size=(n, 6))),
+                     "left_gripper_pos": f(lg), "right_ee_pos": f(rp), "right_ee_rotm": f(rr.reshape(n, 9)),
+                     "right_arm_joint": f(rng.normal(size=(n, 7))), "right_gripper_pos": f(rg), "waist_pos": f(waist)},
+        "actions": {"left_ee_pos": f(lp[nxt]), "left_ee_rotm": f(lr[nxt].reshape(n, 9)), "left_gripper_pos": f(lg[nxt]),
+                    "right_ee_pos": f(rp[nxt]), "right_ee_rotm": f(rr[nxt].reshape(n, 9)), "right_gripper_pos": f(rg[nxt]),
+                    "waist_pos": f(waist[nxt]), "base_vel": f(base)},
+    }
+
+
+def test_xr1_stats_matches_their_formulas():
+    """episode_relative_actions must equal json_dataset._arm_action / _delta / _future
+    for both arms + waist + base, at every chunk start, including the padded tail."""
+    import xr1_stats as XS
+    ep = _two_arm_episode(n=12)
+    n, L = 12, XS.ACTION_LENGTH
+    out = XS.episode_relative_actions(ep, L)
+    assert out.shape == (n, L, 60)
+    P = lambda k: np.asarray(ep["proprios"][k], dtype=float); A = lambda k: np.asarray(ep["actions"][k], dtype=float)
+    for t in (0, 5, 11):
+        steps = min(L, n - t)
+        for arm, off in (("left", 0), ("right", 8)):
+            R0 = P(f"{arm}_ee_rotm")[t].reshape(3, 3); p0 = P(f"{arm}_ee_pos")[t]
+            tp = A(f"{arm}_ee_pos")[t:t + steps]; tR = A(f"{arm}_ee_rotm")[t:t + steps].reshape(-1, 3, 3)
+            want_pos = (R0.T @ (tp - p0).T).T                                 # their _arm_action, verbatim
+            want_aa = R.from_matrix(R0.T @ tR).as_rotvec()
+            want_g = A(f"{arm}_gripper_pos")[t:t + steps] - P(f"{arm}_gripper_pos")[t]
+            assert np.allclose(out[t, :steps, off:off + 3], want_pos, atol=1e-9), (arm, t)
+            assert np.allclose(out[t, :steps, off + 3:off + 6], want_aa, atol=1e-6), (arm, t)
+            assert np.allclose(out[t, :steps, off + 6:off + 7], want_g), (arm, t)
+            assert np.allclose(out[t, steps:, off:off + 7], out[t, steps - 1, off:off + 7]), "pad = repeat last"
+        assert np.allclose(out[t, :steps, 16], (A("waist_pos")[t:t + steps] - P("waist_pos")[t])[:, 0])
+        assert np.allclose(out[t, :steps, 17:20], A("base_vel")[t:t + steps])
+    assert not out[:, :, 7].any() and not out[:, :, 15].any() and not out[:, :, 20:].any(), "reserved dims stay 0"
+    st = XS.episode_states(ep)
+    assert st.shape == (n, 60)
+    assert np.allclose(st[:, 0:6], P("left_arm_joint")) and np.allclose(st[:, 7], P("left_gripper_pos")[:, 0])
+    assert np.allclose(st[:, 8:15], P("right_arm_joint")) and np.allclose(st[:, 15], P("right_gripper_pos")[:, 0])
+    print("  both arms + waist + base packed exactly like json_dataset.py; state layout matches compose_state")
+
+
+def test_xr1_stats_single_arm_and_yaml():
+    """A left-only episode (our case) leaves the right slot zero, and the yaml has XR-1's shapes."""
+    import xr1_stats as XS, tempfile
+    ep = _two_arm_episode(n=8)
+    for k in list(ep["proprios"]):
+        if k.startswith("right"): ep["proprios"][k] = []
+    for k in list(ep["actions"]):
+        if k.startswith("right"): ep["actions"][k] = []
+    out = XS.episode_relative_actions(ep)
+    assert not out[:, :, 8:15].any() and out[:, :, 0:7].any()
+    s = XS.Stats(); s.add(ep); s.add(_two_arm_episode(n=9, seed=4))
+    mean, std, q01, q99 = s.result()
+    assert mean.shape == std.shape == (30, 60) and q01.shape == q99.shape == (1, 60)
+    pad = (q01 == 0) & (q99 == 0)
+    assert (q99[~pad] > q01[~pad]).all(), "validate_quantiles would reject this"
+    with tempfile.TemporaryDirectory() as td:
+        y = Path(td) / "x.yaml"; XS.write_yaml(y, td, mean, std, q01, q99, batch_size=16)
+        txt = y.read_text()
+        assert "batch_size: 16" in txt and txt.count("      - [") == 62
+    print("  single-arm episode -> right slot zero; yaml has 30+30+1+1 rows")
+
+
+def test_converter_stats_unchanged_after_refactor():
+    """fr5_to_xr1 now routes through xr1_stats; on the real data the numbers must be
+    the ones recorded in README §5 (entry-0 pos std ~0.7 mm, entry-29 ~18 mm)."""
+    if not (REAL / "data/chunk-000/file-000.parquet").exists():
+        print("  (skipped: real parquet not at /tmp/ds_v2_edit)"); return
+    import io, contextlib, xr1_stats as XS
+    df, eps, tasks, _ = X.load(REAL)
+    st = XS.Stats()
+    for ep_idx in (0, 1, 2):
+        arr = X.episode_arrays(df, ep_idx); st.add(X.episode_json(ep_idx, arr, tasks[arr["task_index"]], REAL))
+    mean, std, q01, q99 = st.result()
+    assert 3e-4 < std[0, 0:3].mean() < 1.2e-3, std[0, 0:3]          # ~0.7 mm at entry 0
+    assert 8e-3 < std[29, 0:3].mean() < 3e-2, std[29, 0:3]         # ~18 mm at entry 29
+    assert not std[:, 8:15].any() and (q01[0, :6] < q99[0, :6]).all() and q01[0, 7] == 0 and q99[0, 7] == 1
+    print(f"  real episodes 0-2 via the shared path: entry-0 std {std[0,0:3].mean()*1000:.2f} mm, entry-29 {std[29,0:3].mean()*1000:.1f} mm")
+
+
 if __name__ == "__main__":
     for fn in (test_euler_convention_is_extrinsic_xyz, test_wrap_around_is_harmless,
                test_deltas_match_xr1_recover, test_converter_schema_and_stats,
-               test_real_data_joint6_roll_if_present):
+               test_real_data_joint6_roll_if_present, test_xr1_stats_matches_their_formulas,
+               test_xr1_stats_single_arm_and_yaml, test_converter_stats_unchanged_after_refactor):
         print(f"{fn.__name__}:")
         fn()
     print("\nall fr5->xr1 checks passed")

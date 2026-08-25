@@ -210,11 +210,13 @@ Euler convention (proven), and the instruction format (their `_prompt` appends
 | `fr5_to_xr1.py` | LeRobot-v2 → XR-1 JSON episodes + the `(30,60)` mean/std and `(1,60)` q01/q99 config, computed with XR-1's own delta formulas |
 | `deploy_fr5_xr1.py` | robot-PC loop against their inference server: 2-view client, `recover_action`, rotm → Fairino RPY, IK + `servo_j`, receding horizon |
 | `test_fr5_to_xr1.py` | Euler convention (incl. the real-data J6 test), delta ↔ recover round-trip, wrap safety, converter schema/shape checks, stats layout |
-| `../notebooks/train_xr1_fr5_runpod.ipynb` | the RunPod notebook: their pinned env + repo, three env-gated patches (`/dev/shm`, workers, freeze-VLM), data sync + assert, conversion with the same 20 held-out episodes as every pi0 run, one sample through **their** loader before torchrun, training, push in the deploy layout |
+| `xr1_stats.py` | normalisation statistics for **any** XR-1-format dataset — the single implementation of their per-position mean/std and state quantiles; the converter routes through it |
+| `../notebooks/train_xr1_runpod.ipynb` | the RunPod notebook, **dataset-agnostic**: any XR-1-format dataset (HF repo or dir; LeRobot→XR-1 conversion opt-in), their pinned env + repo, five env-gated patches (`/dev/shm`, CSVLogger, workers, freeze-VLM, JSON cache), seeded held-out split, stats, one sample through **their** loader before torchrun, training with `metrics.csv` tailing, push in the deploy layout |
 
 ```bash
 python xr1_eef/fr5_to_xr1.py /tmp/ds_v2_edit --out /workspace/xr1_data --dry-run   # stats + schema, no videos needed
 python xr1_eef/fr5_to_xr1.py /tmp/ds_v2_edit --out /workspace/xr1_data              # writes json/ + configs/fr5.yaml
+python xr1_eef/xr1_stats.py /workspace/xr1_data/json --out configs/data/fr5.yaml   # stats for ANY XR-1-format json dir
 python xr1_eef/test_fr5_to_xr1.py
 ```
 
