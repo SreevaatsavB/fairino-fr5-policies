@@ -97,12 +97,31 @@ def init_from(model, ckpt_path, device="cpu", drop=STATS_BUFFERS):
     kept = [k for k in drop if k in ckpt["model_state"]]
     missing = [k for k in missing if k not in drop]      # ours on purpose
     print(f"[init_from] {ckpt_path}  epoch={ckpt.get('epoch')} "
-          f"action_space={ckpt.get('action_space')!r}")
+          f"val_l1={ckpt.get('val_l1')} action_space={ckpt.get('action_space')!r}")
     print(f"[init_from] kept THIS run's stats, dropped {kept} from the checkpoint")
     if missing or unexpected:
         print(f"[init_from] missing={len(missing)} unexpected={len(unexpected)}")
         for k in (missing + unexpected)[:5]:
             print(f"    {k}")
+
+    # load_state_dict(strict=False) is silent when NOTHING matches, which is
+    # exactly what a key-naming difference looks like — torch.compile prefixes
+    # every key with "_orig_mod." when it wraps a module, so warm-starting a
+    # compiled checkpoint into an uncompiled model (or vice versa) would leave a
+    # freshly-initialised model and a reassuring log line. Fail instead.
+    loaded = len(sd) - len(unexpected)
+    if loaded == 0:
+        raise RuntimeError(
+            f"[init_from] {ckpt_path}: none of the checkpoint's {len(sd)} keys "
+            f"matched the model. Almost always a torch.compile prefix mismatch "
+            f"(COMPILE differs from the run that wrote this checkpoint). "
+            f"checkpoint key sample: {list(sd)[:2]} | model key sample: "
+            f"{list(model.state_dict())[:2]}")
+    frac = loaded / max(len(sd), 1)
+    print(f"[init_from] loaded {loaded}/{len(sd)} tensors ({frac:.1%})")
+    if frac < 0.9:
+        print(f"[init_from] WARNING: {1 - frac:.1%} of the checkpoint did not "
+              f"match — check the two configs before trusting this warm-start")
     return model
 
 

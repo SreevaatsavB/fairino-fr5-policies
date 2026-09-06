@@ -292,6 +292,37 @@ def test_init_from_keeps_this_runs_stats():
     print("  init_from: weights loaded, this run's stats preserved")
 
 
+def test_init_from_refuses_a_silent_no_op():
+    """load_state_dict(strict=False) is silent when NOTHING matches — which is what
+    a torch.compile "_orig_mod." prefix difference looks like. Warm-starting would
+    then leave a freshly-initialised model behind a reassuring log line."""
+    from speedups import init_from
+
+    class M(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lin = torch.nn.Linear(4, 4)
+            self.register_buffer("action_mean", torch.tensor([0.0]))
+            self.register_buffer("action_std", torch.tensor([2.6]))
+
+    old = M()
+    # every key prefixed, as a compiled checkpoint would be
+    sd = {f"_orig_mod.{k}": v for k, v in old.state_dict().items()}
+    ck = Path(REPO) / "_smoke_dataset" / "_tmp_prefixed.pt"
+    ck.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"model_state": sd, "epoch": 6, "action_space": "delta_joint@5"}, ck)
+    try:
+        raised = False
+        try:
+            init_from(M(), str(ck))
+        except RuntimeError as e:
+            raised = "none of the checkpoint" in str(e)
+        assert raised, "init_from silently loaded nothing instead of failing"
+    finally:
+        ck.unlink(missing_ok=True)
+    print("  init_from: refuses a checkpoint whose keys do not match the model")
+
+
 def test_loader_kwargs():
     from speedups import loader_kwargs
     assert loader_kwargs(8)["persistent_workers"] is True
@@ -442,7 +473,8 @@ if __name__ == "__main__":
                test_held_actions_are_independent, test_take_flag_edges,
                test_rollout_axis_labels, test_scaled_lr,
                test_warmup_cosine_shape, test_full_lora_targets_cover_both_towers,
-               test_init_from_keeps_this_runs_stats, test_loader_kwargs,
+               test_init_from_keeps_this_runs_stats,
+               test_init_from_refuses_a_silent_no_op, test_loader_kwargs,
                test_finetune_flags, test_freeze_llm_keep_vision,
                test_loader_uses_file_system_sharing,
                test_pi_family_inference_fixes, test_gate_verdict):
