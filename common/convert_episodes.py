@@ -102,8 +102,19 @@ def _nearest_indices(csv_ts: np.ndarray, cam_ts: np.ndarray) -> np.ndarray:
 
 
 def _load_episode(ep_dir: Path, max_frames: int | None, action_space: str = "joint",
-                  task_override: str | None = None, cameras=(VIDEO_KEY,)):
+                  task_override: str | None = None, cameras=(VIDEO_KEY,),
+                  max_sync_gap: float | None = None):
     """Resample one raw episode onto its camera timestamps.
+
+    max_sync_gap:
+      Drop camera frames whose nearest control row is more than this many seconds
+      away. None (default) keeps every frame — the historical behaviour.
+      Set it when the recorder's control loop stalls: a blocking gripper call
+      freezes the CSV for ~1.85 s while the cameras keep running at 30 Hz, so ~55
+      frames all resample to the SAME control row and become identical zero-motion
+      targets at exactly the visual moment of the grasp. Train on those and the
+      policy learns to freeze when it sees a grasp about to happen — and since it
+      then never moves, the scene never changes and it cannot recover.
 
     action_space:
       "joint"     — action = absolute commanded joint angles + gripper (default).
@@ -134,10 +145,15 @@ def _load_episode(ep_dir: Path, max_frames: int | None, action_space: str = "joi
     df[fill_cols] = df[fill_cols].ffill().bfill()
 
     csv_ts = df["timestamp"].to_numpy(np.float64)
-    idx = _nearest_indices(csv_ts, cam_ts + _SYNC_SHIFT_S)   # FIX-1: apply sync shift
+    shifted = cam_ts + _SYNC_SHIFT_S
+    idx = _nearest_indices(csv_ts, shifted)                  # FIX-1: apply sync shift
+    # which VIDEO frame each row comes from — no longer implicit once max_sync_gap
+    # drops frames, and frame_index must stay the true video position because
+    # dataset._load_frame seeks with it (cap.set(POS_FRAMES) / {idx:06d}.jpg).
+    keep = np.arange(len(idx), dtype=np.int64)
 
     if max_frames is not None:
-        idx = idx[:max_frames]
+        idx, keep = idx[:max_frames], keep[:max_frames]
 
     # Cap to the SHORTEST used camera so every dataset row has a real frame in
     # EVERY view (the two cams can differ by a frame; without this the last row
@@ -146,10 +162,21 @@ def _load_episode(ep_dir: Path, max_frames: int | None, action_space: str = "joi
         _, tsf = CAMERAS[cam_key]
         tsf_path = ep_dir / tsf
         if tsf_path.exists():
-            idx = idx[:len(np.load(tsf_path))]
+            n_cam = len(np.load(tsf_path))
+            idx, keep = idx[:n_cam], keep[:n_cam]
+
+    if max_sync_gap is not None:
+        fresh = np.abs(shifted[keep] - csv_ts[idx]) <= max_sync_gap
+        dropped = int((~fresh).sum())
+        if dropped:
+            print(f"  [sync] {ep_dir.name}: dropped {dropped}/{len(fresh)} frames "
+                  f"with no control sample within {max_sync_gap*1000:.0f} ms")
+        idx, keep = idx[fresh], keep[fresh]
+        if len(idx) == 0:
+            print(f"  [skip] {ep_dir.name}: every frame failed the sync gap")
+            return None
 
     rows = df.iloc[idx].reset_index(drop=True)
-    n = len(rows)
 
     state = rows[STATE_COLS].to_numpy(np.float32)
     eef = rows[EEF_COLS].to_numpy(np.float32)
@@ -179,10 +206,11 @@ def _load_episode(ep_dir: Path, max_frames: int | None, action_space: str = "joi
         "observation.state": list(obs_state),
         "action": list(action),
         "observation.eef_pose": list(eef),
-        "frame_index": np.arange(n, dtype=np.int64),
-        "timestamp": (cam_ts[:n] - cam_ts[0]).astype(np.float32),
-        # which video frame each row maps to (here: identity, one row per frame)
-        "video_frame": np.arange(n, dtype=np.int64),
+        # the TRUE video frame each row came from — identity unless max_sync_gap
+        # dropped frames. dataset._load_frame seeks the video with this value.
+        "frame_index": keep,
+        "timestamp": (cam_ts[keep] - cam_ts[keep[0]]).astype(np.float32),
+        "video_frame": keep,
     }
 
     meta_path = ep_dir / "meta.json"
@@ -202,21 +230,26 @@ def _load_episode(ep_dir: Path, max_frames: int | None, action_space: str = "joi
     return frame, task
 
 
-def _extract_frames(video: Path, n_frames: int, out_dir: Path, stride: int = 1):
+def _extract_frames(video: Path, frame_indices, out_dir: Path, stride: int = 1):
     """Dump frames of `video` as JPEGs named by their TRUE frame index
     (000000.jpg, then every `stride`-th: 000005.jpg, ...). Frames are read
     sequentially (fast) but only every `stride`-th is written, so the dataset's
-    matching frame_stride loads exactly these without wasted disk."""
+    matching frame_stride loads exactly these without wasted disk.
+
+    `frame_indices` are the video positions the dataset will actually ask for
+    (rows' frame_index). Striding over that list rather than over range(n) keeps
+    the JPEGs aligned when max_sync_gap has punched holes in it."""
     if cv2 is None:
         raise RuntimeError("--extract-frames needs opencv-python (cv2) installed")
     out_dir.mkdir(parents=True, exist_ok=True)
+    wanted = {int(f) for f in np.asarray(frame_indices)[::stride]}
     cap = cv2.VideoCapture(str(video))
     written = 0
-    for i in range(n_frames):
+    for i in range(max(wanted) + 1 if wanted else 0):
         ret, frame = cap.read()
         if not ret:
             break
-        if i % stride == 0:
+        if i in wanted:
             cv2.imwrite(str(out_dir / f"{i:06d}.jpg"), frame)
             written += 1
     cap.release()
@@ -226,7 +259,8 @@ def _extract_frames(video: Path, n_frames: int, out_dir: Path, stride: int = 1):
 def convert(episodes_dir: Path, out_dir: Path, extract_frames: bool,
             max_frames: int | None, action_space: str = "joint",
             glob_pattern: str = "episode_*", task_override: str | None = None,
-            cameras=(VIDEO_KEY,), extract_stride: int = 1, exclude=()):
+            cameras=(VIDEO_KEY,), extract_stride: int = 1, exclude=(),
+            max_sync_gap: float | None = None):
     if action_space not in ACTION_NAMES:
         raise SystemExit(f"unknown action_space {action_space!r}; "
                          f"use one of {list(ACTION_NAMES)}")
@@ -250,13 +284,22 @@ def convert(episodes_dir: Path, out_dir: Path, extract_frames: bool,
     all_rows: list[dict] = []
     ep_records: list[dict] = []
     tasks: dict[str, int] = {}
-    extract_jobs: list[tuple] = []   # (video, n, out_dir, stride) — run in parallel below
+    extract_jobs: list[tuple] = []   # (video, frame_ids, out_dir, stride) — parallel below
     cursor = 0  # running absolute row index across episodes
+    # episode_index MUST stay dense. It used to be enumerate(ep_dirs), so every
+    # episode _load_episode skipped left a hole: info.json reported
+    # total_episodes=246 while episode_index ran 0..264, and FR5Dataset.episode_split
+    # hands out range(total_episodes) — so the 19 highest real episodes matched no
+    # split and were silently dropped from BOTH train and val. Only advance on a
+    # successful load. (--exclude is safe either way: it filters ep_dirs up front.)
+    ep_idx = -1
 
-    for ep_idx, ep_dir in enumerate(ep_dirs):
-        loaded = _load_episode(ep_dir, max_frames, action_space, task_override, cameras=cameras)
+    for ep_dir in ep_dirs:
+        loaded = _load_episode(ep_dir, max_frames, action_space, task_override,
+                               cameras=cameras, max_sync_gap=max_sync_gap)
         if loaded is None:
             continue
+        ep_idx += 1
         frame, task = loaded
         n = len(frame["frame_index"])
         task_index = tasks.setdefault(task, len(tasks))
@@ -282,7 +325,7 @@ def convert(episodes_dir: Path, out_dir: Path, extract_frames: bool,
             if src_video.exists():
                 shutil.copyfile(src_video, dst_video)
                 if extract_frames:
-                    extract_jobs.append((dst_video, n,
+                    extract_jobs.append((dst_video, frame["frame_index"],
                                          frames_roots[cam_key] / f"ep-{ep_idx:03d}",
                                          extract_stride))
             else:
@@ -313,8 +356,8 @@ def convert(episodes_dir: Path, out_dir: Path, extract_frames: bool,
               f"(full quality, parallel)...")
         done = 0
         def _job(a):
-            video, n_fr, out_dir, stride = a
-            return _extract_frames(video, n_fr, out_dir, stride)
+            video, frame_ids, out_dir, stride = a
+            return _extract_frames(video, frame_ids, out_dir, stride)
         with ThreadPoolExecutor(max_workers=workers) as ex:
             total_extracted = 0
             for got in ex.map(_job, extract_jobs):
@@ -402,6 +445,12 @@ def main():
     ap.add_argument("--extract-stride", type=int, default=1,
                     help="extract only every Kth frame (matches dataset.frame_stride) "
                          "— the 30 Hz capture is heavily oversampled for ACT")
+    ap.add_argument("--max-sync-gap", type=float, default=None,
+                    help="seconds; drop camera frames with no control sample that "
+                         "close. Unset = keep everything. Use ~0.1 on recordings "
+                         "where a blocking gripper call stalls the control loop "
+                         "(the cameras keep rolling, so ~55 frames collapse onto "
+                         "one frozen control row and teach the policy to freeze)")
     args = ap.parse_args()
 
     cam_map = {"wrist": VIDEO_KEY, "scene": SCENE_KEY}
@@ -411,7 +460,8 @@ def main():
     convert(Path(args.episodes), Path(args.out),
             args.extract_frames, args.max_frames, args.action_space,
             glob_pattern=args.glob, task_override=args.task, cameras=cams,
-            extract_stride=args.extract_stride, exclude=excl)
+            extract_stride=args.extract_stride, exclude=excl,
+            max_sync_gap=args.max_sync_gap)
 
 
 if __name__ == "__main__":
