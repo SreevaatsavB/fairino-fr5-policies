@@ -58,6 +58,11 @@ except ImportError:  # only needed for --extract-frames
 
 
 CODEBASE_VERSION = "v3.0"
+# Capability flag. --exclude used to match the BASENAME only, so on a nested
+# dataset (<object>/episode_NNN) excluding "episode_031" dropped it from every
+# object at once. A notebook that needs path-form excludes asserts this is present,
+# because a stale checkout would silently drop five extra episodes instead.
+EXCLUDE_ACCEPTS_PATHS = True
 FPS = 30  # policy control rate; matches the camera, not the CSV
 
 # CSV column -> dataset feature mapping
@@ -214,10 +219,19 @@ def _load_episode(ep_dir: Path, max_frames: int | None, action_space: str = "joi
     }
 
     meta_path = ep_dir / "meta.json"
-    task = "pick up the block and place it in the bin"
+    task = None
     if meta_path.exists():
         m = json.loads(meta_path.read_text())
-        task = m.get("language_instruction") or m.get("instruction") or task
+        task = m.get("language_instruction") or m.get("instruction")
+    if task is None and task_override is None:
+        # This used to fall back to a hardcoded "pick up the block and place it in
+        # the bin". On a single-task set that was invisible; on a language-conditioned
+        # one it mints a bogus extra task_index and teaches the model a sentence that
+        # describes none of the data. Skip the episode instead — with --task, the
+        # override supplies the label and a missing meta.json does not matter.
+        print(f"  [skip] {ep_dir.name}: no instruction in meta.json "
+              f"(pass --task to label it explicitly)")
+        return None
     # Per-episode instructions from meta.json flow through UNCHANGED — each unique
     # string gets its own task_index, which is what makes the dataset genuinely
     # language-conditioned (the 2026-07 raw set carries 400 unique phrasings over
@@ -266,8 +280,23 @@ def convert(episodes_dir: Path, out_dir: Path, extract_frames: bool,
                          f"use one of {list(ACTION_NAMES)}")
     ep_dirs = sorted(p for p in episodes_dir.glob(glob_pattern) if p.is_dir())
     if exclude:
-        excl = set(exclude); ep_dirs = [p for p in ep_dirs if p.name not in excl]
-        print(f"excluded {len(excl)} episode(s): {sorted(excl)}")
+        # Match the basename OR the path relative to episodes_dir. A nested layout
+        # (<object>/episode_NNN) repeats episode_000.. under every object, so a bare
+        # name is ambiguous: excluding "episode_031" used to drop it from all six
+        # objects at once. "bolt/episode_031" now names exactly one.
+        excl = {e.strip("/") for e in exclude}
+        def _excluded(d):
+            return d.name in excl or d.relative_to(episodes_dir).as_posix() in excl
+        keep = [d for d in ep_dirs if not _excluded(d)]
+        dropped = [d.relative_to(episodes_dir).as_posix() for d in ep_dirs if _excluded(d)]
+        unmatched = sorted(e for e in excl
+                           if not any(e in (d.name, d.relative_to(episodes_dir).as_posix())
+                                      for d in ep_dirs))
+        assert not unmatched, (
+            f"--exclude names nothing under {episodes_dir}: {unmatched}. A typo here "
+            f"silently keeps a broken episode, so this is fatal rather than a warning.")
+        ep_dirs = keep
+        print(f"excluded {len(dropped)} episode(s): {dropped}")
     if not ep_dirs:
         raise SystemExit(f"no {glob_pattern!r} folders under {episodes_dir}")
 

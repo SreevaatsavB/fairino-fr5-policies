@@ -150,12 +150,64 @@ def test_extract_frames_follows_holes(tmp: Path):
           f"{len(wanted)} rows)")
 
 
+def test_nested_exclude_is_path_scoped(tmp: Path):
+    """On a nested dataset, --exclude must name ONE episode, not every object's."""
+    raw, out = tmp / "raw_nested", tmp / "out_nested"
+    for obj in ("bolt", "nut"):
+        for i in (0, 1):
+            write_episode(raw / obj, f"episode_{i:03d}", 40)
+    convert(raw, out, False, None, "joint", glob_pattern="*/episode_*",
+            exclude=("bolt/episode_001",), cameras=(VIDEO_KEY,))
+    data, eps, info = read_out(out)
+    # 4 episodes minus exactly one = 3. The basename behaviour would leave 2.
+    assert info["total_episodes"] == 3, (
+        f"expected 3 (only bolt/episode_001 dropped), got {info['total_episodes']} "
+        f"— a bare-name match would also have dropped nut/episode_001")
+    assert sorted(eps.episode_index.tolist()) == [0, 1, 2], "index not dense"
+    print("  nested exclude is path-scoped .. ok  (nut/episode_001 survived)")
+
+    # a name that matches nothing is fatal, not a silent no-op
+    raised = False
+    try:
+        convert(raw, tmp / "out_typo", False, None, "joint",
+                glob_pattern="*/episode_*", exclude=("bolt/episode_999",),
+                cameras=(VIDEO_KEY,))
+    except AssertionError as e:
+        raised = "names nothing" in str(e)
+    assert raised, "a typo'd --exclude silently kept a broken episode"
+    print("  unmatched exclude is fatal .... ok")
+
+
+def test_missing_meta_does_not_invent_a_task(tmp: Path):
+    """No meta.json used to mean a hardcoded instruction — label corruption on a
+    language-conditioned set. It must skip instead, unless --task supplies one."""
+    raw = tmp / "raw_nometa"
+    write_episode(raw, "episode_000", 40)
+    write_episode(raw, "episode_001", 40)
+    (raw / "episode_001" / "meta.json").unlink()
+
+    convert(raw, tmp / "out_nometa", False, None, "joint", cameras=(VIDEO_KEY,))
+    _, _, info = read_out(tmp / "out_nometa")
+    assert info["total_episodes"] == 1, "the meta-less episode was not skipped"
+    assert info["total_tasks"] == 1, f"invented a task: {info['total_tasks']} tasks"
+
+    # with an explicit override the missing meta.json is irrelevant
+    convert(raw, tmp / "out_override", False, None, "joint", cameras=(VIDEO_KEY,),
+            task_override="pick up the thing")
+    _, _, info2 = read_out(tmp / "out_override")
+    assert info2["total_episodes"] == 2, "--task should rescue the meta-less episode"
+    print("  missing meta.json skips ....... ok  (no invented instruction; "
+          "--task still converts both)")
+
+
 def main():
     tmp = Path(tempfile.mkdtemp(prefix="convtest_"))
     try:
         test_dense_episode_index(tmp)
         test_sync_gap_drops_stall(tmp)
         test_extract_frames_follows_holes(tmp)
+        test_nested_exclude_is_path_scoped(tmp)
+        test_missing_meta_does_not_invent_a_task(tmp)
         print("\nall convert_episodes checks passed")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
