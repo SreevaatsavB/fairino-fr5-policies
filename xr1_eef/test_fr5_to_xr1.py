@@ -263,11 +263,67 @@ def test_converter_stats_unchanged_after_refactor():
     print(f"  real episodes 0-2 via the shared path: entry-0 std {std[0,0:3].mean()*1000:.2f} mm, entry-29 {std[29,0:3].mean()*1000:.1f} mm")
 
 
+def test_filtered_videos_restore_alignment():
+    """max_sync_gap conversions leave holes in frame_index; XR-1's loader reads video
+    frames [start, start+num_frames) contiguously, so referencing the original mp4
+    would pair row t with the WRONG image after every hole. The converter must write
+    a filtered video of exactly the kept frames. Proven here with videos whose pixel
+    value encodes the true frame index."""
+    import cv2
+
+    with tempfile.TemporaryDirectory() as td:
+        root, out = Path(td) / "ds", Path(td) / "out"
+        _synthetic_lerobot(root, n_eps=1, n_frames=34)
+
+        # punch a hole: keep video frames 0..19 and 50..63 (34 rows of a 64-frame video)
+        kept = list(range(20)) + list(range(50, 64))
+        df = pd.read_parquet(root / "data/chunk-000/file-000.parquet")
+        df["frame_index"] = kept
+        df.to_parquet(root / "data/chunk-000/file-000.parquet", index=False)
+
+        for cam in ("observation.images.scene_cam", "observation.images.wrist_cam"):
+            d = root / "videos" / cam / "chunk-000"; d.mkdir(parents=True)
+            vw = cv2.VideoWriter(str(d / "file-000.mp4"),
+                                 cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (32, 32))
+            for i in range(64):                      # pixel value = 4*i, no wrap
+                vw.write(np.full((32, 32, 3), 4 * i, np.uint8))
+            vw.release()
+
+        X.main([str(root), "--out", str(out)])
+
+        ep = json.loads((out / "json" / "episode_000.json").read_text())
+        assert ep["num_frames"] == 34
+        for view in ("ego", "wrist_left"):
+            path = ep["observations"][view][0]["path"]
+            assert "/out/" in path.replace(str(out), "/out/") or str(out) in path, (
+                f"{view} still references the original video: {path}")
+            cap = cv2.VideoCapture(path)
+            n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            assert n == 34, f"{view}: filtered video has {n} frames for 34 rows"
+            for t in (0, 19, 20, 33):                # straddle the hole
+                cap.set(cv2.CAP_PROP_POS_FRAMES, t)
+                ok, fr = cap.read(); assert ok
+                expect = 4 * kept[t]
+                got = float(fr.mean())
+                assert abs(got - expect) < 10, (
+                    f"{view} row {t}: pixel {got:.0f} != expected {expect} "
+                    f"(video frame {kept[t]}) — rows and images are misaligned")
+        # the identity case must keep referencing the ORIGINAL in place (no re-encode)
+        with tempfile.TemporaryDirectory() as td2:
+            root2, out2 = Path(td2) / "ds", Path(td2) / "out"
+            _synthetic_lerobot(root2, n_eps=1, n_frames=34)
+            X.main([str(root2), "--out", str(out2)])
+            ep2 = json.loads((out2 / "json" / "episode_000.json").read_text())
+            assert str(root2) in ep2["observations"]["ego"][0]["path"], "identity case must not re-encode"
+    print("  filtered videos: row t == frame t across a 30-frame hole; identity untouched")
+
+
 if __name__ == "__main__":
     for fn in (test_euler_convention_is_extrinsic_xyz, test_wrap_around_is_harmless,
                test_deltas_match_xr1_recover, test_converter_schema_and_stats,
                test_real_data_joint6_roll_if_present, test_xr1_stats_matches_their_formulas,
-               test_xr1_stats_single_arm_and_yaml, test_converter_stats_unchanged_after_refactor):
+               test_xr1_stats_single_arm_and_yaml,
+               test_filtered_videos_restore_alignment, test_converter_stats_unchanged_after_refactor):
         print(f"{fn.__name__}:")
         fn()
     print("\nall fr5->xr1 checks passed")

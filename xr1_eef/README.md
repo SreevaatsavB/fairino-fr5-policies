@@ -207,7 +207,7 @@ Euler convention (proven), and the instruction format (their `_prompt` appends
 
 | file | what |
 |---|---|
-| `fr5_to_xr1.py` | LeRobot-v2 → XR-1 JSON episodes + the `(30,60)` mean/std and `(1,60)` q01/q99 config, computed with XR-1's own delta formulas |
+| `fr5_to_xr1.py` | LeRobot → XR-1 JSON episodes + the `(30,60)` mean/std and `(1,60)` q01/q99 config, computed with XR-1's own delta formulas. When the LeRobot data came through `convert_episodes --max-sync-gap` (gripper-stall filter), `frame_index` has holes; XR-1's loader reads video frames contiguously, so the converter re-encodes per-episode videos of exactly the kept frames — row t == frame t survives the drop (`test_filtered_videos_restore_alignment` proves it pixel-wise) |
 | `deploy_fr5_xr1.py` | robot-PC loop against their inference server: 2-view client, `recover_action`, rotm → Fairino RPY, IK + `servo_j`, receding horizon |
 | `test_fr5_to_xr1.py` | Euler convention (incl. the real-data J6 test), delta ↔ recover round-trip, wrap safety, converter schema/shape checks, stats layout |
 | `xr1_stats.py` | normalisation statistics for **any** XR-1-format dataset — the single implementation of their per-position mean/std and state quantiles; the converter routes through it |
@@ -219,6 +219,22 @@ python xr1_eef/fr5_to_xr1.py /tmp/ds_v2_edit --out /workspace/xr1_data          
 python xr1_eef/xr1_stats.py /workspace/xr1_data/json --out configs/data/fr5.yaml   # stats for ANY XR-1-format json dir
 python xr1_eef/test_fr5_to_xr1.py
 ```
+
+## 7.5 Upstream status — checked 2026-10-15
+
+- Their `xr1/` code is **unchanged since 2026-08-03** (`4da1db0a`); every commit since
+  is README-only. All five files our marker-guarded patches anchor on are untouched.
+- They shipped an official stats demo, `xr1/tools/compute_normalize.py` (2026-08-26).
+  Its per-window formulas are line-for-line the ones `xr1_stats.py` implements (and
+  `test_xr1_stats_matches_their_formulas` checks). One deliberate difference: their
+  demo averages only complete 30-frame windows (`range(n - 29)`), while ours uses
+  every frame as a chunk start with pad-last — which is what their **trainer**
+  (`json_dataset.py`) actually samples. Stats should describe the training tensors,
+  so ours stays.
+- Issue #14: their IK is Pinocchio-based numerical and **not released** — deploy
+  keeps using Fairino's `GetInverseKin`, as `deploy_fr5_xr1.py` already does.
+- Issue #4 has their small-set recipe for reference: RoboDojo = 3,500 samples,
+  60k steps, batch 256, peak lr 1e-5, EE poses, no history (multi-GPU full FT).
 
 ## 8. Next
 

@@ -95,14 +95,66 @@ def episode_arrays(df, ep_idx):
     nxt = np.minimum(np.arange(n) + 1, n - 1)
     task_index = int(rows["task_index"].iloc[0])
     return dict(n=n, pos=pos, rotm=rotm, joints=joints, grip=grip,
-                a_pos=pos[nxt], a_rotm=rotm[nxt], a_grip=act[:, 6], task_index=task_index)
+                a_pos=pos[nxt], a_rotm=rotm[nxt], a_grip=act[:, 6], task_index=task_index,
+                frame_index=rows["frame_index"].to_numpy(np.int64))
 
 
-def episode_json(ep_idx, arr, instruction, root: Path):
+def write_filtered_video(src: Path, dst: Path, frames) -> int:
+    """Re-encode only `frames` (ascending video positions) of src into dst.
+
+    XR-1's loader reads video frames [start, start+num_frames) CONTIGUOUSLY — the
+    JSON format cannot express holes. convert_episodes' max_sync_gap drops the
+    camera frames recorded while the blocking gripper call froze the control loop,
+    which leaves frame_index with ~55-frame holes at every grasp; referencing the
+    original mp4 would then pair row t with video frame t and drift the images up
+    to ~1.8 s ahead of the states. Writing a video of exactly the kept frames
+    restores row t == frame t.
+    """
+    import cv2  # local: only the filtered path needs it
+    cap = cv2.VideoCapture(str(src))
+    w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    # ponytail: cv2/mp4v re-encode, default bitrate — if grasp-time artefacts show
+    # up in training images, switch to an ffmpeg select-filter copy at high bitrate
+    vw = cv2.VideoWriter(str(dst), cv2.VideoWriter_fourcc(*"mp4v"), 30.0, (w, h))
+    wanted = {int(f) for f in frames}
+    written = 0
+    for i in range(max(wanted) + 1):
+        ok, frame = cap.read()
+        if not ok:
+            break
+        if i in wanted:
+            vw.write(frame)
+            written += 1
+    cap.release(); vw.release()
+    return written
+
+
+def video_paths(ep_idx, arr, root: Path, out: Path, dry_run=False):
+    """Per-camera video path for one episode: the original mp4 when frame_index is
+    the identity, a filtered re-encode under <out>/videos/ when it has holes."""
+    fi = arr["frame_index"]
+    src = {cam: root / "videos" / key / "chunk-000" / f"file-{ep_idx:03d}.mp4"
+           for cam, key in CAMS.items()}
+    if np.array_equal(fi, np.arange(arr["n"])):
+        return {cam: str(p.resolve()) for cam, p in src.items()}, False
+    if dry_run:
+        return {cam: str(p.resolve()) for cam, p in src.items()}, True
+    out_paths = {}
+    for cam, p in src.items():
+        dst = out / "videos" / cam / f"episode_{ep_idx:03d}.mp4"
+        got = write_filtered_video(p, dst, fi)
+        assert got == arr["n"], (
+            f"{p} ({cam}): wrote {got} frames for {arr['n']} rows — the source video "
+            f"is missing, unreadable, or shorter than frame_index claims")
+        out_paths[cam] = str(dst.resolve())
+    return out_paths, True
+
+
+def episode_json(ep_idx, arr, instruction, vids: dict):
     n = arr["n"]
     z1, z3, z6, z9 = np.zeros((n, 1)), np.zeros((n, 3)), np.zeros((n, 6)), np.tile(np.eye(3).ravel(), (n, 1))
     tolist = lambda a: np.asarray(a, dtype=np.float32).round(6).tolist()
-    vid = lambda cam: str((root / "videos" / cam / "chunk-000" / f"file-{ep_idx:03d}.mp4").resolve())
     prompt = ("The following observations are captured from multiple views.\n"
               "# Ego View\n<image>\n# Left-Wrist View\n<image>\n"
               f"Generate robot actions for the task:\n{instruction}")
@@ -115,8 +167,8 @@ def episode_json(ep_idx, arr, instruction, root: Path):
             "conversations": [{"from": "human", "value": prompt}, {"from": "gpt", "value": ""}],
         }]},
         "observations": {
-            "ego":        [{"path": vid(CAMS["ego"]), "start": 0, "crop_bbox": None}],
-            "wrist_left": [{"path": vid(CAMS["wrist_left"]), "start": 0, "crop_bbox": None}],
+            "ego":        [{"path": vids["ego"], "start": 0, "crop_bbox": None}],
+            "wrist_left": [{"path": vids["wrist_left"], "start": 0, "crop_bbox": None}],
         },
         "proprios": {
             "left_ee_pos": tolist(arr["pos"]), "left_ee_rotm": tolist(arr["rotm"].reshape(n, 9)),
@@ -150,18 +202,23 @@ def main(argv=None):
         print("[tool frame] TOOL_FRAME_FIX = identity — XR-1's canonical EE-frame orientation "
               "is undocumented; verify before robot time (README §6 risk 1)")
 
-    stats, n_frames = Stats(), 0
+    stats, n_frames, n_filtered = Stats(), 0, 0
     (out / "json").mkdir(parents=True, exist_ok=True) if not args.dry_run else None
     for k, ep_idx in enumerate(ep_ids):
         arr = episode_arrays(df, ep_idx)
         instr = tasks[arr["task_index"]]
-        ep = episode_json(ep_idx, arr, instr, root)
+        vids, filtered = video_paths(ep_idx, arr, root, out, dry_run=args.dry_run)
+        n_filtered += int(filtered)
+        ep = episode_json(ep_idx, arr, instr, vids)
         stats.add(ep); n_frames += arr["n"]          # stats from the SAME dict that is written
         if not args.dry_run:
             (out / "json" / f"episode_{ep_idx:03d}.json").write_text(json.dumps(ep))
         if k < 3 or k == len(ep_ids) - 1:
             print(f"  ep {ep_idx:03d}: {arr['n']:5d} frames  {instr!r}")
     mean, std, q01, q99 = stats.result()
+    if n_filtered:
+        print(f"[videos] {n_filtered}/{len(ep_ids)} episodes had frame_index holes "
+              f"(max_sync_gap conversions){' — filtered re-encodes written under ' + str(out / 'videos') if not args.dry_run else '; dry run leaves originals referenced, do NOT train on dry-run output'}")
     print(f"\n{len(ep_ids)} episodes, {n_frames:,} frames -> {stats.n:,} chunk starts")
     print(f"  action std @ entry 0 : pos {std[0, 0:3].round(5)} m   rot {std[0, 3:6].round(5)} rad   grip {std[0, 6]:.3f}")
     print(f"  action std @ entry 29: pos {std[29, 0:3].round(4)} m   rot {std[29, 3:6].round(4)} rad")
